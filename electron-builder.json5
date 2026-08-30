@@ -1,15 +1,23 @@
 // @see - https://www.electron.build/configuration/configuration
 {
   "$schema": "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
-  "appId": "YourAppID",
+  "appId": "uk.guandalini.mtga-sound",
   "asar": true,
-  "productName": "YourAppName",
+  "productName": "MTGA Sound Mod",
   "directories": {
     "output": "release/${version}"
   },
   "files": [
     "dist",
     "dist-electron"
+  ],
+  "publish": [
+    {
+      "provider": "github",
+      "owner": "g-guandalini",
+      "repo": "mtga-sound",
+      "releaseType": "release"
+    }
   ],
   "mac": {
     "target": [
@@ -39,5 +47,10 @@
       "AppImage"
     ],
     "artifactName": "${productName}-Linux-${version}.${ext}"
+  },
+  "appImage": {
+    "executableArgs": [
+      "--no-sandbox"
+    ]
   }
 }

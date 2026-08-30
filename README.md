@@ -1,18 +1,49 @@
-# Vue 3 + TypeScript + Vite
+# MTGA Sound Mod
 
-This template should help get you started developing with Vue 3 and TypeScript in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+Aplicativo Electron para associar sons às cartas do Magic: The Gathering Arena.
 
-## Recommended IDE Setup
+## Desenvolvimento
 
-- [VS Code](https://code.visualstudio.com/) + [Volar](https://marketplace.visualstudio.com/items?itemName=Vue.volar) (and disable Vetur) + [TypeScript Vue Plugin (Volar)](https://marketplace.visualstudio.com/items?itemName=Vue.vscode-typescript-vue-plugin).
+```bash
+npm install
+npm run dev:electron
+```
 
-## Type Support For `.vue` Imports in TS
+## Gerar instalador local
 
-TypeScript cannot handle type information for `.vue` imports by default, so we replace the `tsc` CLI with `vue-tsc` for type checking. In editors, we need [TypeScript Vue Plugin (Volar)](https://marketplace.visualstudio.com/items?itemName=Vue.vscode-typescript-vue-plugin) to make the TypeScript language service aware of `.vue` types.
+```bash
+npm run dist
+```
 
-If the standalone TypeScript plugin doesn't feel fast enough to you, Volar has also implemented a [Take Over Mode](https://github.com/johnsoncodehk/volar/discussions/471#discussioncomment-1361669) that is more performant. You can enable it by the following steps:
+O instalador é criado em `release/<versão>/`. O formato depende do sistema operacional:
 
-1. Disable the built-in TypeScript Extension
-   1. Run `Extensions: Show Built-in Extensions` from VSCode's command palette
-   2. Find `TypeScript and JavaScript Language Features`, right click and select `Disable (Workspace)`
-2. Reload the VSCode window by running `Developer: Reload Window` from the command palette.
+- Windows: instalador NSIS `.exe`
+- Linux: `.AppImage`
+- macOS: `.dmg`
+
+## Publicar uma versão
+
+Atualize a versão e envie a tag para o GitHub:
+
+```bash
+npm version patch
+git push origin main --follow-tags
+```
+
+O workflow do GitHub Actions compila os instaladores para Windows, Linux e macOS e publica os artefatos em uma GitHub Release. O `electron-updater` verifica novas versões automaticamente quando o aplicativo empacotado é iniciado.
+
+Para publicar manualmente, configure `GH_TOKEN` e execute:
+
+```bash
+npm run release
+```
+
+## Dados do usuário
+
+O banco baixado, os mapeamentos de sons, os arquivos de áudio e as configurações ficam no diretório de dados do Electron (`app.getPath('userData')`). Assim, reinstalações e atualizações não devem apagar os sons do usuário.
+
+A primeira execução após esta mudança migra automaticamente o `data/soundMap.json` e a pasta `sounds` da instalação anterior, quando encontrados.
+
+## Assinatura
+
+Para distribuição pública, configure assinatura de código. Sem assinatura, o Windows pode exibir alertas do SmartScreen; no macOS, assinatura/notarização são necessárias para que atualizações automáticas funcionem corretamente.

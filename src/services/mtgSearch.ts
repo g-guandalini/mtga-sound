@@ -29,3 +29,18 @@ export async function searchCards(
     }
   })
 }
+
+export async function getCardImage(name: string) {
+  try {
+    const response = await fetch(
+      `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(name)}`
+    )
+
+    if (!response.ok) return ''
+
+    const card = await response.json()
+    return card.image_uris?.normal || card.card_faces?.[0]?.image_uris?.normal || ''
+  } catch {
+    return ''
+  }
+}

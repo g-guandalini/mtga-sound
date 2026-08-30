@@ -1,8 +1,12 @@
 import fs from 'fs'
 import path from 'path'
 import { app } from 'electron'
+import { USER_DATA_DIR } from './paths'
 
-const DATA_DIR = path.join(app.getAppPath(), 'data')
+const DATA_DIR = path.join(USER_DATA_DIR, 'data')
+const LEGACY_DATA_DIR = path.join(app.getAppPath(), 'data')
+const SOUNDS_DIR = path.join(USER_DATA_DIR, 'sounds')
+const LEGACY_SOUNDS_DIR = path.join(app.getAppPath(), 'sounds')
 
 const SOUND_MAP_FILE = path.join(DATA_DIR, 'soundMap.json')
 
@@ -14,10 +18,24 @@ export function ensureSoundMapExists() {
   }
 
   if (!fs.existsSync(SOUND_MAP_FILE)) {
-    fs.writeFileSync(
-      SOUND_MAP_FILE,
-      JSON.stringify({}, null, 2)
-    )
+    const legacySoundMap = path.join(LEGACY_DATA_DIR, 'soundMap.json')
+
+    if (legacySoundMap !== SOUND_MAP_FILE && fs.existsSync(legacySoundMap)) {
+      fs.copyFileSync(legacySoundMap, SOUND_MAP_FILE)
+    } else {
+      fs.writeFileSync(
+        SOUND_MAP_FILE,
+        JSON.stringify({}, null, 2)
+      )
+    }
+  }
+
+  if (
+    !fs.existsSync(SOUNDS_DIR) &&
+    LEGACY_SOUNDS_DIR !== SOUNDS_DIR &&
+    fs.existsSync(LEGACY_SOUNDS_DIR)
+  ) {
+    fs.cpSync(LEGACY_SOUNDS_DIR, SOUNDS_DIR, { recursive: true })
   }
 }
 
@@ -54,7 +72,7 @@ export function getSoundPath(grpId: number): string | null {
   }
 
   const fullPath = path.join(
-    app.getAppPath(),
+    USER_DATA_DIR,
     relativePath
   )
 

@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 
 contextBridge.exposeInMainWorld('electronAPI', {
   /*
@@ -30,6 +30,30 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   getCardVersions: (name: string) =>
     ipcRenderer.invoke('cards:versions', name),
+
+  getLogFileStatus: () =>
+    ipcRenderer.invoke('log-file:status'),
+
+  selectLogFile: () =>
+    ipcRenderer.invoke('log-file:select'),
+
+  getFilePath: (file: File) =>
+    webUtils.getPathForFile(file),
+
+  listSounds: () =>
+    ipcRenderer.invoke('sounds:list'),
+
+  playSound: (grpId: number) =>
+    ipcRenderer.invoke('sound:play', grpId),
+
+  replaceSound: (data: {
+    cardName: string
+    grpIds: number[]
+  }) =>
+    ipcRenderer.invoke('sound:replace', data),
+
+  removeSound: (grpIds: number[]) =>
+    ipcRenderer.invoke('sound:remove', grpIds),
 
   /*
   |--------------------------------------------------------------------------
