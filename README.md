@@ -44,6 +44,10 @@ O banco baixado, os mapeamentos de sons, os arquivos de áudio e as configuraç�
 
 A primeira execução após esta mudança migra automaticamente o `data/soundMap.json` e a pasta `sounds` da instalação anterior, quando encontrados.
 
+## Atualização da base de cartas
+
+O aplicativo baixa a base no primeiro início. Quando o CDN não fornece validadores HTTP (`ETag` ou `Last-Modified`), ele baixa o SQLite no máximo uma vez a cada 24 horas para evitar transferir o mesmo arquivo em toda abertura. Se o CDN estiver indisponível, uma base local existente continua sendo usada. Sem uma base local, o aplicativo abre e informa que a busca de cartas ficará indisponível até o download funcionar.
+
 ## Assinatura
 
 Para distribuição pública, configure assinatura de código. Sem assinatura, o Windows pode exibir alertas do SmartScreen; no macOS, assinatura/notarização são necessárias para que atualizações automáticas funcionem corretamente.

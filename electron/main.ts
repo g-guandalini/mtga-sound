@@ -43,6 +43,13 @@ const { autoUpdater } = electronUpdater
 const DB_URL =
   'https://cdn.guandalini.uk/mtga-sound/database.sqlite'
 
+// The current CDN response does not expose ETag or Last-Modified on HEAD.
+// Until the publisher exposes a reliable version validator, avoid downloading
+// the same database on every application launch.
+const DATABASE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
+const DATABASE_HEAD_TIMEOUT_MS = 8_000
+const DATABASE_DOWNLOAD_TIMEOUT_MS = 15_000
+
 const DB_PATH = path.join(
   USER_DATA_DIR,
   'database.sqlite'
@@ -55,6 +62,7 @@ const DB_PATH = path.join(
 */
 
 let mainWindow: BrowserWindow | null = null
+let databaseStartupWarning = ''
 
 function sendLog(message: string) {
   console.log(message)
@@ -77,9 +85,13 @@ async function downloadDatabaseIfChanged() {
     lastModified?: string
     contentLength?: string
   } = {}
+  let headUnavailable = false
 
   try {
-    const head = await fetch(DB_URL, { method: 'HEAD' })
+    const head = await fetch(DB_URL, {
+      method: 'HEAD',
+      signal: AbortSignal.timeout(DATABASE_HEAD_TIMEOUT_MS),
+    })
 
     if (head.ok) {
       remoteMetadata = {
@@ -88,32 +100,59 @@ async function downloadDatabaseIfChanged() {
         contentLength: head.headers.get('content-length') ?? undefined,
       }
     } else {
-      sendLog(`⚠️ HEAD da database retornou HTTP ${head.status}; verificando por download`)
+      headUnavailable = head.status !== 405 && head.status !== 501
+      sendLog(`⚠️ HEAD da database retornou HTTP ${head.status}; verificando a base local ou tentando download`)
     }
   } catch (error) {
-    sendLog(`⚠️ Não foi possível consultar os metadados da database; verificando por download`)
+    headUnavailable = true
+    sendLog(`⚠️ Não foi possível consultar os metadados da database; usando a base local se disponível`)
     console.error(error)
   }
 
   const hasValidator = Boolean(
     remoteMetadata.etag || remoteMetadata.lastModified
   )
+  const hasLocalDatabase = fs.existsSync(DB_PATH)
+
+  if (hasLocalDatabase && headUnavailable) {
+    databaseStartupWarning = 'Não foi possível consultar o CDN. O aplicativo está usando a cópia local da base de cartas.'
+    sendLog('⚠️ CDN indisponível; mantendo a database local')
+    return false
+  }
+
+  const lastCheckedAt = metadata?.checkedAt
+    ? Date.parse(metadata.checkedAt)
+    : NaN
+  const checkAge = Date.now() - lastCheckedAt
+  const checkedRecently =
+    Number.isFinite(lastCheckedAt) &&
+    checkAge >= 0 &&
+    checkAge < DATABASE_CHECK_INTERVAL_MS
+
+  if (hasLocalDatabase && !hasValidator && checkedRecently) {
+    sendLog('✅ Database local verificada nas últimas 24 horas; mantendo a cópia local')
+    return false
+  }
+
   const isUnchanged =
-    fs.existsSync(DB_PATH) &&
+    hasLocalDatabase &&
     metadata &&
     hasValidator &&
-    remoteMetadata.etag === metadata.etag &&
-    remoteMetadata.lastModified === metadata.lastModified &&
-    remoteMetadata.contentLength === metadata.contentLength
+    (!remoteMetadata.etag || remoteMetadata.etag === metadata.etag) &&
+    (!remoteMetadata.lastModified || remoteMetadata.lastModified === metadata.lastModified) &&
+    (!remoteMetadata.contentLength || remoteMetadata.contentLength === metadata.contentLength)
 
-  if (isUnchanged) {
+  if (isUnchanged && metadata) {
+    saveDatabaseMetadata({ ...metadata, checkedAt: new Date().toISOString() })
     sendLog('✅ Database local já está atualizado')
     return false
   }
 
   sendLog('📦 Baixando database SQLite...')
 
-  const res = await fetch(DB_URL)
+  const res = await fetch(DB_URL, {
+    signal: AbortSignal.timeout(DATABASE_DOWNLOAD_TIMEOUT_MS),
+  })
 
   if (!res.ok) {
     throw new Error(`HTTP ${res.status}`)
@@ -135,7 +174,7 @@ async function downloadDatabaseIfChanged() {
 
   closeDb()
   fs.writeFileSync(DB_PATH, buffer)
-  saveDatabaseMetadata(remoteMetadata)
+  saveDatabaseMetadata({ ...remoteMetadata, checkedAt: new Date().toISOString() })
 
   sendLog('✅ Database baixado com sucesso')
   return true
@@ -443,6 +482,11 @@ ipcMain.handle('log-file:status', () => ({
   selected: Boolean(getSavedLogFilePath()),
 }))
 
+ipcMain.handle('database:status', () => ({
+  available: fs.existsSync(DB_PATH),
+  warning: databaseStartupWarning,
+}))
+
 ipcMain.handle('log-file:select', async () => {
   const logFilePath = await chooseLogFile()
 
@@ -468,10 +512,18 @@ app.whenReady().then(async () => {
       recursive: true,
     })
 
-    await updateDatabaseAndSounds()
+    try {
+      await updateDatabaseAndSounds()
+    } catch (error) {
+      console.error('Não foi possível atualizar a database:', error)
+      databaseStartupWarning = fs.existsSync(DB_PATH)
+        ? 'Não foi possível atualizar a base de cartas. O aplicativo está usando a cópia local.'
+        : 'Não foi possível baixar a base de cartas. Conecte-se à internet e reinicie o aplicativo para habilitar a busca.'
+    }
 
     registerSoundIpc()
     await createWindow()
+    if (databaseStartupWarning) sendLog(`⚠️ ${databaseStartupWarning}`)
     checkForApplicationUpdates()
 
     const logFilePath = getSavedLogFilePath()

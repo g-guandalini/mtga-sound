@@ -24,6 +24,11 @@ interface Window {
       selected: boolean
     }>
 
+    getDatabaseStatus: () => Promise<{
+      available: boolean
+      warning: string
+    }>
+
     selectLogFile: () => Promise<{
       selected: boolean
     }>

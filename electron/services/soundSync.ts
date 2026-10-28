@@ -64,6 +64,7 @@ export type DatabaseMetadata = {
   etag?: string
   lastModified?: string
   contentLength?: string
+  checkedAt?: string
 }
 
 export function readDatabaseMetadata(): DatabaseMetadata | null {

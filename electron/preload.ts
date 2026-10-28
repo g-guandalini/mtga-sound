@@ -34,6 +34,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getLogFileStatus: () =>
     ipcRenderer.invoke('log-file:status'),
 
+  getDatabaseStatus: () =>
+    ipcRenderer.invoke('database:status'),
+
   selectLogFile: () =>
     ipcRenderer.invoke('log-file:select'),
 

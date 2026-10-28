@@ -8,6 +8,7 @@ const cards = ref<any[]>([])
 const loading = ref(false)
 const logFileSelected = ref(true)
 const selectingLogFile = ref(false)
+const databaseNotice = ref('')
 
 const selectedCard = ref<any | null>(null)
 const selectedFile = ref<File | null>(null)
@@ -28,6 +29,13 @@ let searchTimer: ReturnType<typeof setTimeout> | undefined
 let searchRequest = 0
 
 onMounted(async () => {
+  const databaseStatus = await window.electronAPI.getDatabaseStatus()
+  databaseNotice.value = databaseStatus.warning || (
+    databaseStatus.available
+      ? ''
+      : 'A base de cartas ainda não está disponível. Conecte-se à internet e reinicie o aplicativo para baixá-la.'
+  )
+
   const status = await window.electronAPI.getLogFileStatus()
   logFileSelected.value = status.selected
 
@@ -247,6 +255,14 @@ async function saveSound() {
 
 <template>
   <div class="container">
+    <div
+      v-if="databaseNotice"
+      class="databaseNotice"
+      role="status"
+    >
+      {{ databaseNotice }}
+    </div>
+
     <div
       v-if="!logFileSelected"
       class="logFileNotice"
@@ -508,6 +524,16 @@ async function saveSound() {
   flex: 1;
   min-height: 0;
   width: 100%;
+}
+
+.databaseNotice {
+  flex: none;
+  padding: 12px 24px;
+  background: #33280f;
+  border-bottom: 1px solid #72571a;
+  color: #fff3cb;
+  font-size: 13px;
+  line-height: 1.4;
 }
 
 .logFileNotice {
