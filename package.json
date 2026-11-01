@@ -35,6 +35,9 @@
   },
   "main": "dist-electron/main.js",
   "build": {
+    "linux": {
+      "icon": "public/mtga-sound-logo.png"
+    },
     "win": {
       "icon": "build/icon.ico"
     }
