@@ -26,6 +26,7 @@
     "artifactName": "${productName}-Mac-${version}-Installer.${ext}"
   },
   "win": {
+    "icon": "build/icon.ico",
     "target": [
       {
         "target": "nsis",
@@ -43,6 +44,7 @@
     "deleteAppDataOnUninstall": false
   },
   "linux": {
+    "icon": "public/mtga-sound-logo.png",
     "target": [
       "AppImage"
     ],
