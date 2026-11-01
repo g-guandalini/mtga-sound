@@ -6,6 +6,7 @@ import { getCardVersions, searchCards } from './services/cards.ts'
 const search = ref('')
 const cards = ref<any[]>([])
 const loading = ref(false)
+const cardAutocompleteOpen = ref(false)
 const logFileSelected = ref(true)
 const selectingLogFile = ref(false)
 const databaseNotice = ref('')
@@ -15,6 +16,9 @@ const cardTriggerErrors = ref<Record<string, string>>({})
 const audioPlayerScope = ref<'all' | 'mine'>('all')
 const savingAudioPlayerScope = ref(false)
 const audioPlayerScopeError = ref('')
+const autoStartWithArena = ref({ available: false, enabled: false })
+const savingAutoStartWithArena = ref(false)
+const autoStartWithArenaError = ref('')
 
 const selectedCard = ref<any | null>(null)
 const currentView = ref<'cards' | 'sounds' | 'deck' | 'settings'>('deck')
@@ -35,6 +39,15 @@ const deckTitle = ref('')
 const selectedArenaDeck = ref<any | null>(null)
 const savedArenaDecks = ref<any[]>([])
 const loadingSavedDecks = ref(false)
+const selectedDeckFormat = ref('')
+const availableDeckFormats = computed(() => [...new Set(
+  savedArenaDecks.value
+    .map((deck) => String(deck.format ?? '').trim())
+    .filter(Boolean)
+)].sort((a, b) => a.localeCompare(b)))
+const filteredSavedArenaDecks = computed(() => selectedDeckFormat.value
+  ? savedArenaDecks.value.filter((deck) => String(deck.format ?? '').trim() === selectedDeckFormat.value)
+  : savedArenaDecks.value)
 const soundMappings = ref<Array<{
   cardName: string
   grpIds: number[]
@@ -82,6 +95,7 @@ let searchRequest = 0
 onMounted(async () => {
   audioTriggerModes.value = await window.electronAPI.listAudioTriggerModes().catch(() => ({}))
   audioPlayerScope.value = await window.electronAPI.getAudioPlayerScope().catch(() => 'all')
+  autoStartWithArena.value = await window.electronAPI.getAutoStartWithArena().catch(() => ({ available: false, enabled: false }))
   const databaseStatus = await window.electronAPI.getDatabaseStatus()
   databaseNotice.value = databaseStatus.warning || (
     databaseStatus.available
@@ -151,6 +165,24 @@ async function setAudioPlayerScope(scope: 'all' | 'mine') {
     audioPlayerScopeError.value = 'Não foi possível salvar essa opção.'
   } finally {
     savingAudioPlayerScope.value = false
+  }
+}
+
+async function toggleAutoStartWithArena() {
+  if (!autoStartWithArena.value.available || savingAutoStartWithArena.value) return
+  savingAutoStartWithArena.value = true
+  autoStartWithArenaError.value = ''
+  try {
+    const result = await window.electronAPI.setAutoStartWithArena(!autoStartWithArena.value.enabled)
+    if (!result.success) {
+      autoStartWithArenaError.value = result.error || 'Não foi possível salvar essa opção.'
+      return
+    }
+    autoStartWithArena.value = { ...autoStartWithArena.value, enabled: Boolean(result.enabled) }
+  } catch {
+    autoStartWithArenaError.value = 'Não foi possível salvar essa opção.'
+  } finally {
+    savingAutoStartWithArena.value = false
   }
 }
 
@@ -350,10 +382,14 @@ async function loadSavedArenaDecks() {
         result.decks.flatMap((deck: any) => deck.cover ? [deck.cover] : [])
       )
       const coverByGrpId = new Map(covers.map((cover: any) => [cover.grp_id, cover.image]))
-      savedArenaDecks.value = result.decks.map((deck: any) => ({
+      const loadedDecks = result.decks.map((deck: any) => ({
         ...deck,
         coverImage: deck.cover ? coverByGrpId.get(deck.cover.grp_id) || '' : '',
       }))
+      savedArenaDecks.value = loadedDecks
+      if (!loadedDecks.some((deck: any) => String(deck.format ?? '').trim() === selectedDeckFormat.value)) {
+        selectedDeckFormat.value = ''
+      }
     }
   } catch (error) {
     console.error(error)
@@ -703,9 +739,11 @@ async function handleSearch() {
   if (!query) {
     cards.value = []
     loading.value = false
+    cardAutocompleteOpen.value = false
     return
   }
 
+  cardAutocompleteOpen.value = true
   loading.value = true
   const request = ++searchRequest
 
@@ -723,6 +761,7 @@ async function handleSearch() {
 }
 
 async function selectCard(card: any) {
+  cardAutocompleteOpen.value = false
   selectedCardSaved.value = false
   selectedCardSaveError.value = ''
   try {
@@ -927,21 +966,48 @@ async function assignMyInstantsSound(sound: any) {
   <div class="container">
     <header class="topbar">
       <div class="brandLockup">
-        <img src="/mtga-sound-mark.svg" alt="" class="brandMark" />
+        <img src="/mtga-sound-logo.png" alt="" class="brandMark" />
         <div class="brandText">
           <span>MTG ARENA TOOLS</span>
           <strong>MTGA Sound Mod</strong>
         </div>
       </div>
 
+      <nav class="topNavigation" aria-label="Navegação principal">
+        <button type="button" aria-label="Buscar cartas" title="Buscar cartas" :class="{ active: currentView === 'cards' }" @click="currentView = 'cards'">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></svg>
+          <span>Buscar cartas</span>
+        </button>
+        <button type="button" aria-label="Gerenciar sons" title="Gerenciar sons" :class="{ active: currentView === 'sounds' }" @click="openSoundManager">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 5h12M4 10h12M4 15h8"/><circle cx="16" cy="15" r="2"/></svg>
+          <span>Gerenciar sons</span>
+        </button>
+        <button type="button" aria-label="Meus Decks" title="Meus Decks" :class="{ active: currentView === 'deck' }" @click="openMyDecks">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 3.5h7l3 3v10H5z"/><path d="M12 3.5v3h3M7.5 10h5M7.5 13h5"/></svg>
+          <span>Meus Decks</span>
+        </button>
+        <button type="button" aria-label="Configurações" title="Configurações" :class="{ active: currentView === 'settings' }" @click="currentView = 'settings'">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="3"/><path d="M10 2.5v2M10 15.5v2M17.5 10h-2M4.5 10h-2M15.3 4.7l-1.4 1.4M6.1 13.9l-1.4 1.4M15.3 15.3l-1.4-1.4M6.1 6.1 4.7 4.7"/></svg>
+          <span>Configurações</span>
+        </button>
+      </nav>
+
       <div class="topbarStatus">
-        <span class="statusPill" :class="logFileSelected ? 'statusReady' : 'statusPending'">
+        <span
+          class="statusPill"
+          :class="logFileSelected ? 'statusReady' : 'statusPending'"
+          :title="logFileSelected ? 'Player.log conectado' : 'Player.log pendente'"
+        >
           <i></i>
-          {{ logFileSelected ? 'Player.log conectado' : 'Player.log pendente' }}
+          Player.log
         </span>
-        <span class="statusPill" :class="databaseNotice ? 'statusPending' : 'statusReady'">
+        <span
+          class="statusPill"
+          :class="databaseNotice ? 'statusPending' : 'statusReady'"
+          :title="databaseNotice || 'Banco de dados do Arena pronto'"
+        >
           <i></i>
-          {{ databaseNotice ? 'Arena não detectado' : 'Banco do Arena pronto' }}
+          Banco de Dados
         </span>
       </div>
     </header>
@@ -974,93 +1040,6 @@ async function assignMyInstantsSound(sound: any) {
     </div>
 
     <div class="appBody">
-      <div class="sidebar">
-      <div class="sidebarSectionLabel">
-        <span>{{ currentView === 'cards' ? 'BIBLIOTECA DE CARTAS' : 'NAVEGAÇÃO' }}</span>
-        <span v-if="currentView === 'cards' && cards.length">{{ cards.length }} resultados</span>
-      </div>
-
-      <div class="navigation">
-        <button
-          :class="{ active: currentView === 'cards' }"
-          @click="currentView = 'cards'"
-        >
-          <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5" /><path d="m13 13 4 4" /></svg>
-          Buscar cartas
-        </button>
-        <button
-          :class="{ active: currentView === 'sounds' }"
-          @click="openSoundManager"
-        >
-          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 5h12M4 10h12M4 15h8" /><circle cx="16" cy="15" r="2" /></svg>
-          Gerenciar sons
-        </button>
-        <button
-          :class="{ active: currentView === 'deck' }"
-          @click="openMyDecks"
-        >
-          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 3.5h7l3 3v10H5z" /><path d="M12 3.5v3h3M7.5 10h5M7.5 13h5" /></svg>
-          Meus Decks
-        </button>
-        <button
-          :class="{ active: currentView === 'settings' }"
-          @click="currentView = 'settings'"
-        >
-          <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="3"/><path d="M10 2.5v2M10 15.5v2M17.5 10h-2M4.5 10h-2M15.3 4.7l-1.4 1.4M6.1 13.9l-1.4 1.4M15.3 15.3l-1.4-1.4M6.1 6.1 4.7 4.7"/></svg>
-          Configurações
-        </button>
-      </div>
-
-      <div
-        v-if="currentView === 'cards'"
-        class="searchBox"
-      >
-        <label for="card-search">Buscar por nome</label>
-        <input
-          id="card-search"
-          v-model="search"
-          aria-label="Buscar carta pelo nome"
-          placeholder="Ex.: Lightning Bolt"
-          @input="handleSearch"
-        />
-      </div>
-
-      <div
-        v-if="currentView === 'cards' && loading"
-        class="loading"
-      >
-        Carregando cartas...
-      </div>
-
-      <div
-        v-if="currentView === 'cards'"
-        class="results"
-      >
-        <div
-          v-for="(card, index) in cards"
-          :key="index"
-          class="cardRow"
-          :class="{
-            active:
-              selectedCard?.name ===
-              card.name,
-          }"
-          @click="selectCard(card)"
-        >
-          {{ card.name }}
-        </div>
-        <div v-if="!search && !cards.length" class="resultsHint">
-          <span class="hintIcon">⌕</span>
-          <strong>Encontre uma carta</strong>
-          <span>Digite um nome para começar a busca.</span>
-        </div>
-        <div v-else-if="search && !loading && !cards.length" class="resultsHint">
-          <strong>Nenhuma carta encontrada</strong>
-          <span>Tente outro nome ou uma parte do nome.</span>
-        </div>
-      </div>
-    </div>
-
       <div class="content">
       <input
         ref="replacementInput"
@@ -1069,15 +1048,111 @@ async function assignMyInstantsSound(sound: any) {
         class="hiddenFileInput"
         @change="replaceSound"
       />
-      <div v-if="currentView === 'cards'" class="pageHeader">
-        <div>
-          <span class="eyebrow">EDITOR DE EFEITOS SONOROS</span>
-          <h1>{{ selectedCard ? 'Personalize o som da carta' : 'Personalize os sons do seu deck' }}</h1>
-          <p>{{ selectedCard ? 'Escolha o áudio que será associado à carta selecionada.' : 'Selecione uma carta e associe a ela um som personalizado.' }}</p>
+      <div v-if="currentView === 'cards'" class="cardSearchPage">
+        <div class="pageHeader">
+          <div>
+            <span class="eyebrow">EDITOR DE EFEITOS SONOROS</span>
+            <h1>{{ selectedCard ? 'Personalize o som da carta' : 'Buscar cartas' }}</h1>
+            <p>{{ selectedCard ? 'Escolha o áudio que será associado à carta selecionada.' : 'Encontre uma carta para visualizar versões e configurar o som.' }}</p>
+          </div>
+        </div>
+
+        <div class="cardSearchToolbar">
+          <div class="cardSearchAutocompleteAnchor" @keydown.esc="cardAutocompleteOpen = false">
+            <div class="cardSearchInputWrap">
+              <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></svg>
+              <input
+                id="card-search"
+                v-model="search"
+                type="search"
+                aria-label="Buscar carta pelo nome"
+                placeholder="Buscar carta pelo nome, ex.: Lightning Bolt"
+                @input="handleSearch"
+                @focus="cardAutocompleteOpen = Boolean(search.trim())"
+              />
+            </div>
+            <div v-if="cardAutocompleteOpen && search.trim()" class="cardSearchAutocomplete" role="listbox" aria-label="Resultados da busca">
+              <div class="cardAutocompleteMeta">
+                <span>{{ loading ? 'Buscando cartas…' : `${cards.length} resultados` }}</span>
+                <span v-if="loading" class="processingSpinner"></span>
+              </div>
+              <div class="results cardSearchResults">
+                <button
+                  v-for="(card, index) in cards"
+                  :key="index"
+                  type="button"
+                  class="cardRow"
+                  :class="{ active: selectedCard?.name === card.name }"
+                  role="option"
+                  :aria-selected="selectedCard?.name === card.name"
+                  @click="selectCard(card)"
+                >
+                  {{ card.name }}
+                </button>
+                <div v-if="!loading && !cards.length" class="resultsHint">
+                  <strong>Nenhuma carta encontrada</strong>
+                  <span>Tente outro nome ou uma parte do nome.</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="cardSearchLayout">
+          <section class="cardSearchSelectionPanel" aria-label="Carta selecionada">
+            <div v-if="selectedCard" class="previewCard">
+              <div class="cardArtworkColumn">
+                <div class="imageContainer">
+                  <img v-if="selectedCard.image" :src="selectedCard.image" :alt="selectedCard.name" />
+                  <div v-else class="cardArtworkFallback">🎴</div>
+                  <template v-if="selectedCard.versionImages?.length > 1">
+                    <button class="imageVersionArrow previous" aria-label="Versão anterior" @click="navigateCardVersion(-1)">‹</button>
+                    <button class="imageVersionArrow next" aria-label="Próxima versão" @click="navigateCardVersion(1)">›</button>
+                  </template>
+                </div>
+                <span v-if="selectedCard.versionImagesLoaded && selectedCard.versionImages?.length > 1" class="versionCount">
+                  {{ selectedCard.versionImages.length }} versões
+                </span>
+              </div>
+
+              <div class="cardInfo">
+                <div class="cardMetaLabel">CARTA SELECIONADA</div>
+                <h2>{{ selectedCard.name }}</h2>
+                <p class="cardDescription">O efeito será associado a todas as versões encontradas desta carta.</p>
+
+                <div v-if="selectedCard.isLand" class="cardTriggerControl selectedCardTriggerControl">
+                  <span>Reproduzir o som:</span>
+                  <span class="landTriggerBadge" title="Terrenos não são conjurados nem resolvidos; o som toca quando o terreno é jogado.">Ao jogar</span>
+                </div>
+                <div v-else class="cardTriggerControl selectedCardTriggerControl" role="group" :aria-label="`Quando tocar o som de ${selectedCard.name}`">
+                  <span>Reproduzir o som:</span>
+                  <div class="triggerModeGroup">
+                    <button type="button" class="triggerModeButton" :class="{ selected: getCardAudioTriggerMode(selectedCard.name) === 'resolution' }" :aria-pressed="getCardAudioTriggerMode(selectedCard.name) === 'resolution'" :disabled="isSavingCardAudioTriggerMode(selectedCard.name)" @click="setCardAudioTriggerMode(selectedCard.name, 'resolution')">Resolução</button>
+                    <button type="button" class="triggerModeButton" :class="{ selected: getCardAudioTriggerMode(selectedCard.name) === 'cast' }" :aria-pressed="getCardAudioTriggerMode(selectedCard.name) === 'cast'" :disabled="isSavingCardAudioTriggerMode(selectedCard.name)" @click="setCardAudioTriggerMode(selectedCard.name, 'cast')">Conjuração</button>
+                  </div>
+                </div>
+                <p class="cardTriggerDescription">{{ selectedCard.isLand ? 'Toca quando o terreno é jogado.' : getCardAudioTriggerMode(selectedCard.name) === 'resolution' ? 'Toca quando a mágica resolve de fato; se for anulada, o som não toca.' : 'Toca assim que a mágica é conjurada, mesmo que seja anulada depois.' }}</p>
+                <p v-if="getCardAudioTriggerError(selectedCard.name)" class="cardTriggerError" role="alert">{{ getCardAudioTriggerError(selectedCard.name) }}</p>
+
+                <button class="myInstantsSearchButton soundSourcePrimaryButton" @click="openSoundSourceModal({ cardName: selectedCard.name, grpIds: selectedCard.grpIds || [], kind: 'selected-card' })">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.3"/><path d="m16 16 4.2 4.2M10.8 7.5v6.6M7.5 10.8h6.6"/></svg>
+                  Adicionar ou trocar som
+                </button>
+                <p v-if="selectedCardSaved" class="myInstantsSuccess">Som salvo e vinculado a esta carta.</p>
+                <p v-if="selectedCardSaveError" class="myInstantsError selectedCardSourceError" role="alert">{{ selectedCardSaveError }}</p>
+              </div>
+            </div>
+
+            <div v-else class="emptyState cardSearchEmptyState">
+              <div class="emptyIcon">🎴</div>
+              <h2>Selecione uma carta</h2>
+              <p>Busque pelo nome e escolha um resultado para configurar o som.</p>
+            </div>
+          </section>
         </div>
       </div>
 
-      <div v-if="currentView === 'deck'" class="deckBuilder">
+      <div v-else-if="currentView === 'deck'" class="deckBuilder">
         <div class="managerHeader deckHeader">
           <div>
             <h1>{{ selectedArenaDeck ? selectedArenaDeck.name : 'Meus Decks' }}</h1>
@@ -1099,8 +1174,25 @@ async function assignMyInstantsSound(sound: any) {
             Nenhum deck salvo foi encontrado no log.
           </div>
 
-          <div v-if="savedArenaDecks.length" class="savedDeckList">
-            <button v-for="deck in savedArenaDecks" :key="deck.id" class="savedDeckRow" @click="importSavedArenaDeck(deck)">
+          <div v-if="savedArenaDecks.length && availableDeckFormats.length" class="deckFormatFilterBar">
+            <div class="deckFormatFilterIntro">
+              <span class="deckFormatFilterIcon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M4 5h16l-6.2 7.1v5.1l-3.6 1.8v-6.9L4 5Z"/></svg>
+              </span>
+              <span><strong>Filtrar decks</strong><small>Escolha um formato</small></span>
+            </div>
+            <div class="deckFormatSelectWrap">
+              <select id="deck-format-filter" v-model="selectedDeckFormat" aria-label="Filtrar decks por formato">
+                <option value="">Todos os formatos</option>
+                <option v-for="format in availableDeckFormats" :key="format" :value="format">{{ format }}</option>
+              </select>
+              <svg class="deckFormatSelectChevron" viewBox="0 0 20 20" aria-hidden="true"><path d="m5 7.5 5 5 5-5"/></svg>
+            </div>
+            <span class="deckFormatCount"><strong>{{ filteredSavedArenaDecks.length }}</strong> {{ filteredSavedArenaDecks.length === 1 ? 'deck' : 'decks' }}</span>
+          </div>
+
+          <div v-if="filteredSavedArenaDecks.length" class="savedDeckList">
+            <button v-for="deck in filteredSavedArenaDecks" :key="deck.id" class="savedDeckRow" @click="importSavedArenaDeck(deck)">
               <img v-if="deck.coverImage" class="savedDeckCover" :src="deck.coverImage" :alt="`Capa do deck ${deck.name}`">
               <span v-else class="savedDeckIcon">▤</span>
               <span class="savedDeckText">
@@ -1111,6 +1203,9 @@ async function assignMyInstantsSound(sound: any) {
               </span>
               <span class="savedDeckOpen">Abrir →</span>
             </button>
+          </div>
+          <div v-else-if="savedArenaDecks.length" class="managerEmpty deckFormatEmpty">
+            Nenhum deck encontrado neste formato.
           </div>
 
           <details class="manualDeckImport">
@@ -1303,7 +1398,7 @@ async function assignMyInstantsSound(sound: any) {
           <div>
             <span class="eyebrow">PREFERÊNCIAS DO APLICATIVO</span>
             <h1>Configurações</h1>
-            <p>Defina para quais jogadores os sons podem tocar.</p>
+            <p>Configure a reprodução dos sons e a inicialização do aplicativo.</p>
           </div>
         </div>
 
@@ -1333,76 +1428,36 @@ async function assignMyInstantsSound(sound: any) {
           </button>
           <p v-if="audioPlayerScopeError" class="audioPlayerScopeError" role="alert">{{ audioPlayerScopeError }}</p>
         </section>
-      </div>
 
-      <div
-        v-else-if="currentView === 'cards' && selectedCard"
-        class="previewCard"
-      >
-        <div class="cardArtworkColumn">
-          <div class="imageContainer">
-            <img v-if="selectedCard.image" :src="selectedCard.image" :alt="selectedCard.name" />
-            <div v-else class="cardArtworkFallback">🎴</div>
-            <template v-if="selectedCard.versionImages?.length > 1">
-              <button class="imageVersionArrow previous" aria-label="Versão anterior" @click="navigateCardVersion(-1)">‹</button>
-              <button class="imageVersionArrow next" aria-label="Próxima versão" @click="navigateCardVersion(1)">›</button>
-            </template>
-          </div>
-          <span
-            v-if="selectedCard.versionImagesLoaded && selectedCard.versionImages?.length > 1"
-            class="versionCount"
+        <section class="playerScopeSettings settingsScopeCard" aria-labelledby="arena-startup-title">
+          <h2 id="arena-startup-title">Inicialização</h2>
+          <button
+            type="button"
+            class="playerScopeOption autoStartOption"
+            :class="{ selected: autoStartWithArena.enabled }"
+            role="switch"
+            :aria-checked="autoStartWithArena.enabled"
+            :disabled="!autoStartWithArena.available || savingAutoStartWithArena"
+            @click="toggleAutoStartWithArena"
           >
-            {{ selectedCard.versionImages.length }} versões
-          </span>
-        </div>
-
-        <div class="cardInfo">
-          <div class="cardMetaLabel">CARTA SELECIONADA</div>
-          <h2>{{ selectedCard.name }}</h2>
-          <p class="cardDescription">O efeito será associado a todas as versões encontradas desta carta.</p>
-
-          <div v-if="selectedCard.isLand" class="cardTriggerControl selectedCardTriggerControl">
-            <span>Reproduzir o som:</span>
-            <span class="landTriggerBadge" title="Terrenos não são conjurados nem resolvidos; o som toca quando o terreno é jogado.">Ao jogar</span>
-          </div>
-          <div v-else class="cardTriggerControl selectedCardTriggerControl" role="group" :aria-label="`Quando tocar o som de ${selectedCard.name}`">
-            <span>Reproduzir o som:</span>
-            <div class="triggerModeGroup">
-              <button type="button" class="triggerModeButton" :class="{ selected: getCardAudioTriggerMode(selectedCard.name) === 'resolution' }" :aria-pressed="getCardAudioTriggerMode(selectedCard.name) === 'resolution'" :disabled="isSavingCardAudioTriggerMode(selectedCard.name)" @click="setCardAudioTriggerMode(selectedCard.name, 'resolution')">Resolução</button>
-              <button type="button" class="triggerModeButton" :class="{ selected: getCardAudioTriggerMode(selectedCard.name) === 'cast' }" :aria-pressed="getCardAudioTriggerMode(selectedCard.name) === 'cast'" :disabled="isSavingCardAudioTriggerMode(selectedCard.name)" @click="setCardAudioTriggerMode(selectedCard.name, 'cast')">Conjuração</button>
-            </div>
-          </div>
-          <p class="cardTriggerDescription">{{ selectedCard.isLand ? 'Toca quando o terreno é jogado.' : getCardAudioTriggerMode(selectedCard.name) === 'resolution' ? 'Toca quando a mágica resolve de fato; se for anulada, o som não toca.' : 'Toca assim que a mágica é conjurada, mesmo que seja anulada depois.' }}</p>
-          <p v-if="getCardAudioTriggerError(selectedCard.name)" class="cardTriggerError" role="alert">{{ getCardAudioTriggerError(selectedCard.name) }}</p>
-
-          <button class="myInstantsSearchButton soundSourcePrimaryButton" @click="openSoundSourceModal({ cardName: selectedCard.name, grpIds: selectedCard.grpIds || [], kind: 'selected-card' })">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.3"/><path d="m16 16 4.2 4.2M10.8 7.5v6.6M7.5 10.8h6.6"/></svg>
-            Adicionar ou trocar som
+            <span class="autoStartSwitch" :class="{ enabled: autoStartWithArena.enabled }"><i></i></span>
+            <span>
+              <strong>Iniciar junto com o MTG Arena</strong>
+              <small>{{ autoStartWithArena.available ? 'O app fica em segundo plano e abre quando detectar que o Arena iniciou.' : 'Disponível na versão instalada para Windows.' }}</small>
+            </span>
           </button>
-          <p v-if="selectedCardSaved" class="myInstantsSuccess">Som salvo e vinculado a esta carta.</p>
-          <p v-if="selectedCardSaveError" class="myInstantsError selectedCardSourceError" role="alert">{{ selectedCardSaveError }}</p>
-        </div>
+          <p v-if="savingAutoStartWithArena" class="autoStartStatus">Salvando preferência…</p>
+          <p v-if="autoStartWithArenaError" class="audioPlayerScopeError" role="alert">{{ autoStartWithArenaError }}</p>
+        </section>
       </div>
 
-      <div
-        v-else-if="currentView === 'cards'"
-        class="emptyState"
-      >
-        <div class="emptyIcon">
-          🎴
-        </div>
-
-        <h2>
-          Procure uma carta
-        </h2>
-
-        <p>
-          Busque uma carta de Magic
-          para associar um som.
-        </p>
-      </div>
       </div>
     </div>
+    <footer class="appFooter">
+      <a href="https://github.com/g-guandalini/mtga-sound" target="_blank" rel="noopener noreferrer">Código Fonte</a>
+      <span aria-hidden="true">|</span>
+      <span>Desenvolvido por <a href="https://github.com/g-guandalini" target="_blank" rel="noopener noreferrer">Guandalini</a></span>
+    </footer>
     <div v-if="cardPreview" class="cardPreviewOverlay" @click.self="closeCardPreview">
       <section class="cardPreviewModal" role="dialog" aria-modal="true" :aria-label="`Imagens de ${cardPreview.name}`">
         <header class="cardPreviewHeader">
@@ -1835,6 +1890,22 @@ button:hover {
 .deckHeader { flex: none; }
 .myDecksPanel { flex: 1; min-height: 0; overflow: auto; padding: 18px; scrollbar-color: #35303e transparent; }
 .deckLogMessage { display: flex; flex-direction: column; gap: 7px; padding: 14px; border: 1px solid #503b31; border-radius: 10px; background: #241b19; color: #e7c5bb; font-size: 13px; }
+.deckFormatFilterBar { display: flex; min-height: 68px; align-items: center; gap: 14px; margin-bottom: 14px; padding: 10px 13px; border: 1px solid #302d3b; border-radius: 12px; background: linear-gradient(110deg, rgba(35, 31, 48, 0.84), rgba(20, 21, 29, 0.95) 58%); }
+.deckFormatFilterIntro { display: flex; min-width: 155px; align-items: center; gap: 10px; }
+.deckFormatFilterIcon { display: grid; width: 36px; height: 36px; flex: none; place-items: center; border: 1px solid #4b405e; border-radius: 10px; background: #282335; color: #c2aaff; }
+.deckFormatFilterIcon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.deckFormatFilterIntro strong, .deckFormatFilterIntro small { display: block; }
+.deckFormatFilterIntro strong { color: #e9e4f2; font-size: 12px; font-weight: 700; }
+.deckFormatFilterIntro small { margin-top: 2px; color: #8e899a; font-size: 10px; }
+.deckFormatSelectWrap { position: relative; width: min(320px, 45%); min-width: 210px; }
+.deckFormatSelectWrap select { width: 100%; min-height: 40px; appearance: none; padding: 0 38px 0 12px; border: 1px solid #44404f; border-radius: 9px; outline: none; background: linear-gradient(180deg, #22212b, #191922); color: #eeebf5; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; transition: border-color 130ms ease, box-shadow 130ms ease, background 130ms ease; }
+.deckFormatSelectWrap select:hover { border-color: #675686; background: #23212d; }
+.deckFormatSelectWrap select:focus-visible { border-color: #9a83db; box-shadow: 0 0 0 3px rgba(132, 113, 220, 0.16); }
+.deckFormatSelectWrap option { background: #191922; color: #eeebf5; }
+.deckFormatSelectChevron { position: absolute; top: 50%; right: 12px; width: 16px; height: 16px; transform: translateY(-50%); fill: none; stroke: #a9a2b6; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
+.deckFormatCount { display: inline-flex; min-height: 30px; align-items: center; gap: 5px; margin-left: auto; padding: 0 10px; border: 1px solid #393440; border-radius: 999px; background: rgba(17, 17, 24, 0.65); color: #9e99a8; font-size: 11px; white-space: nowrap; }
+.deckFormatCount strong { color: #d6c6ff; font-size: 12px; }
+.deckFormatEmpty { padding: 18px; }
 .savedDeckList { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
 .savedDeckRow { display: flex; align-items: center; min-width: 0; min-height: 184px; width: 100%; gap: 18px; padding: 14px; border: 1px solid #302e3b; border-radius: 15px; background: linear-gradient(135deg, #201e2a, #15161d 78%); color: #e7e3ef; text-align: left; cursor: pointer; transition: transform 140ms ease, border-color 140ms ease, background 140ms ease, box-shadow 140ms ease; }
 .savedDeckRow:hover { transform: translateY(-2px); border-color: #7664a8; background: linear-gradient(135deg, #2a2538, #191821 78%); box-shadow: 0 10px 26px #0004; }
@@ -2095,10 +2166,53 @@ button:hover {
   gap: 12px;
 }
 
+.topNavigation {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  margin: 0 18px;
+}
+
+.topNavigation button {
+  display: flex;
+  min-height: 42px;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: #a7a9b4;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.topNavigation button svg {
+  width: 17px;
+  height: 17px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.topNavigation button:hover { transform: none; background: #171a22; color: #f0eef9; }
+.topNavigation button.active { border-color: #37304f; background: #211e31; color: #c4b4ff; }
+
 .brandMark {
-  width: 42px;
-  height: 42px;
-  filter: drop-shadow(0 5px 14px rgba(106, 82, 217, 0.32));
+  width: 48px;
+  height: 48px;
+  border: 1px solid rgba(245, 199, 105, 0.52);
+  border-radius: 13px;
+  object-fit: cover;
+  box-shadow: 0 5px 18px rgba(91, 53, 210, 0.35), inset 0 0 0 1px rgba(255, 255, 255, 0.08);
 }
 
 .brandText {
@@ -2123,30 +2237,30 @@ button:hover {
 }
 
 .topbarStatus {
-  gap: 9px;
+  gap: 14px;
 }
 
 .statusPill {
-  gap: 8px;
-  padding: 8px 11px;
-  border: 1px solid #292d37;
-  border-radius: 999px;
-  background: #14171e;
-  color: #b7bac6;
-  font-size: 13px;
-  font-weight: 600;
+  gap: 6px;
+  padding: 4px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #858895;
+  font-size: 11px;
+  font-weight: 500;
   white-space: nowrap;
 }
 
 .statusPill i {
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background: #868997;
 }
 
-.statusReady i { background: #5fd2a4; box-shadow: 0 0 9px rgba(95, 210, 164, 0.44); }
-.statusPending i { background: #f0b75b; box-shadow: 0 0 9px rgba(240, 183, 91, 0.38); }
+.statusReady i { background: #58ad8d; }
+.statusPending i { background: #bd9858; }
 
 .databaseNotice,
 .logFileNotice {
@@ -2241,6 +2355,49 @@ button:hover {
   border-color: #37304f;
   color: #c4b4ff;
 }
+
+.sidebarFooter {
+  display: flex;
+  flex: none;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: auto;
+  padding: 13px 10px 2px;
+  border-top: 1px solid #242832;
+  color: #898c99;
+  font-size: 12px;
+}
+
+.sidebarFooterSeparator { color: #5e606b; }
+
+.sidebarFooter a {
+  width: fit-content;
+  color: #b9a8f5;
+  text-decoration: none;
+  transition: color 120ms ease;
+}
+
+.sidebarFooter a:hover {
+  color: #e3d9ff;
+  text-decoration: underline;
+}
+
+.appFooter {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  padding: 8px 30px;
+  border-top: 1px solid #242832;
+  color: #898c99;
+  font-size: 12px;
+}
+
+.appFooter a { color: #b9a8f5; text-decoration: none; }
+.appFooter a:hover { color: #e3d9ff; text-decoration: underline; }
 
 .searchBox {
   display: flex;
@@ -2362,6 +2519,77 @@ button:hover {
   color: #9093a0;
   font-size: 14px;
 }
+
+.cardSearchPage {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.cardSearchPage .pageHeader { margin-bottom: 16px; }
+
+.cardSearchToolbar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  z-index: 5;
+  margin-bottom: 16px;
+}
+
+.cardSearchAutocompleteAnchor { position: relative; z-index: 5; width: 100%; }
+
+.cardSearchInputWrap {
+  display: flex;
+  min-width: 0;
+  min-height: 48px;
+  flex: 1;
+  align-items: center;
+  gap: 11px;
+  padding: 0 14px;
+  border: 1px solid #353342;
+  border-radius: 11px;
+  background: #11131a;
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.cardSearchInputWrap:focus-within { border-color: #8471dc; box-shadow: 0 0 0 3px rgba(132, 113, 220, 0.13); }
+.cardSearchInputWrap svg { width: 19px; height: 19px; flex: none; fill: none; stroke: #8e879e; stroke-width: 1.7; stroke-linecap: round; }
+.cardSearchInputWrap input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: #f3f1f8; font: inherit; font-size: 14px; }
+.cardSearchInputWrap input::placeholder { color: #777987; }
+
+.cardSearchAutocomplete {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 7px);
+  right: 0;
+  left: 0;
+  overflow: hidden;
+  border: 1px solid #3b3749;
+  border-radius: 12px;
+  background: #171820;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.5);
+}
+
+.cardAutocompleteMeta { display: flex; min-height: 36px; align-items: center; justify-content: space-between; gap: 10px; padding: 0 14px; border-bottom: 1px solid #2c2a35; color: #9894a4; font-size: 11px; }
+.cardAutocompleteMeta .processingSpinner { width: 14px; height: 14px; border-width: 2px; }
+
+.cardSearchLayout {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.cardSearchResults { max-height: min(320px, 45vh); overflow-y: auto; margin: 0; padding: 4px; scrollbar-color: #36313f transparent; }
+.cardSearchResults .cardRow { width: 100%; margin: 0; border-radius: 7px; background: transparent; text-align: left; cursor: pointer; }
+.cardSearchResults .resultsHint { padding: 18px; }
+
+.cardSearchSelectionPanel { display: flex; min-width: 0; min-height: 360px; flex: 1; align-items: stretch; }
+.cardSearchSelectionPanel .previewCard { width: 100%; max-width: 1120px; min-height: 340px; max-height: none; margin: auto; padding: 20px; gap: 22px; }
+.cardSearchSelectionPanel .cardArtworkColumn { flex-basis: 245px; }
+.cardSearchEmptyState { display: flex; width: 100%; min-height: 0; flex-direction: column; align-items: center; justify-content: center; margin: 0; padding: 32px; text-align: center; }
 
 .versionBadge {
   padding: 7px 10px;
@@ -2737,19 +2965,29 @@ button:disabled { cursor: not-allowed; filter: grayscale(0.5); opacity: 0.48; }
 .myInstantsPagination button { flex: none; }
 
 @media (max-width: 1100px) {
-  .sidebar { width: 280px; min-width: 280px; }
+  .topbar { min-height: auto; flex-wrap: nowrap; gap: 14px; padding: 12px 20px; }
+  .topNavigation { order: 1; flex: none; justify-content: flex-start; margin: 0; }
+  .topNavigation button { width: 42px; justify-content: center; padding: 0; }
+  .topNavigation button span { display: none; }
+  .topbarStatus { order: 2; width: auto; justify-content: flex-end; margin-left: auto; }
   .content { padding: 24px; }
+  .cardSearchLayout { gap: 12px; }
+  .cardSearchSelectionPanel .previewCard { padding: 16px; gap: 18px; }
+  .cardSearchSelectionPanel .cardArtworkColumn { flex-basis: 220px; }
   .soundList { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .deckGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 900px) {
-  .topbar { min-height: 68px; padding: 0 18px; }
-  .sidebar { width: 250px; min-width: 250px; padding: 18px 12px; }
+  .topbar { min-height: auto; padding: 10px 18px; }
+  .topNavigation { overflow-x: auto; }
   .topbarStatus { gap: 5px; }
-  .statusPill { padding: 7px 8px; font-size: 12px; }
+  .statusPill { padding: 4px 0; font-size: 11px; }
   .content { padding: 20px; }
   .pageHeader { margin-bottom: 18px; }
+  .cardSearchLayout { gap: 10px; }
+  .cardSearchSelectionPanel .previewCard { gap: 14px; padding: 13px; }
+  .cardSearchSelectionPanel .cardArtworkColumn { flex-basis: 200px; }
   .previewCard { max-height: none; }
   .soundList { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .deckGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -2757,12 +2995,24 @@ button:disabled { cursor: not-allowed; filter: grayscale(0.5); opacity: 0.48; }
 
 @media (max-width: 680px) {
   .topbarStatus .statusPill:nth-child(2) { display: none; }
-  .appBody { flex-direction: column; }
-  .sidebar { width: 100%; min-width: 0; max-height: 45%; border-right: 0; border-bottom: 1px solid #242832; }
-  .navigation { flex-direction: row; padding-bottom: 12px; }
-  .navigation button { flex: 1; }
+  .topbar { flex-wrap: wrap; gap: 8px; padding: 10px 12px; }
+  .brandLockup { width: 100%; }
+  .topNavigation { width: 100%; flex: none; gap: 3px; margin: 0; padding-bottom: 2px; }
+  .topNavigation button { min-height: 38px; gap: 6px; padding: 0 8px; font-size: 12px; }
+  .topNavigation button svg { width: 15px; height: 15px; }
+  .topbarStatus { width: 100%; justify-content: flex-start; }
   .results { max-height: 150px; }
   .content { min-height: 0; }
+  .appFooter { padding: 8px 12px; }
+  .deckFormatFilterBar { flex-wrap: wrap; gap: 9px; }
+  .deckFormatFilterIntro { min-width: 0; flex: 1; }
+  .deckFormatSelectWrap { width: 100%; min-width: 0; order: 3; }
+  .deckFormatCount { margin-left: 0; }
+  .cardSearchPage { min-height: 900px; }
+  .cardSearchToolbar { margin-bottom: 12px; }
+  .cardSearchLayout { gap: 12px; }
+  .cardSearchResults { max-height: min(260px, 40vh); }
+  .cardSearchSelectionPanel { min-height: 390px; }
   .previewCard { flex-direction: row; align-items: center; padding: 16px; gap: 16px; }
   .imageContainer { flex-basis: 35%; min-width: 100px; }
   .imageContainer img, .cardArtworkFallback { max-height: 260px; }
@@ -2818,6 +3068,12 @@ button:disabled { cursor: not-allowed; filter: grayscale(0.5); opacity: 0.48; }
 .playerScopeOption strong, .playerScopeOption small { display: block; }
 .playerScopeOption strong { font-size: 12px; line-height: 1.3; }
 .playerScopeOption small { margin-top: 3px; color: #aaa4b6; font-size: 11px; line-height: 1.4; }
+.autoStartOption:disabled { cursor: not-allowed; opacity: .65; }
+.autoStartSwitch { display: flex; flex: 0 0 32px; width: 32px; height: 18px; align-items: center; margin-top: 1px; padding: 2px; border: 1px solid #5a5665; border-radius: 999px; background: #302e37; transition: background 140ms ease, border-color 140ms ease; }
+.autoStartSwitch i { width: 12px; height: 12px; border-radius: 50%; background: #b7b1c0; transition: transform 140ms ease, background 140ms ease; }
+.autoStartSwitch.enabled { border-color: #8d73db; background: #624fa5; }
+.autoStartSwitch.enabled i { transform: translateX(14px); background: #fff; }
+.autoStartStatus { margin: 0; color: #aaa4b6; font-size: 11px; }
 .audioPlayerScopeError { margin: 0; color: #ef9b9b; font-size: 11px; }
 .settingsPage { display: flex; width: 100%; min-height: 0; flex-direction: column; }
 .settingsHeader { flex: none; }

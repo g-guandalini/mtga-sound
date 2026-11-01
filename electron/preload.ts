@@ -57,6 +57,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getAudioPlayerScope: () => ipcRenderer.invoke('audio-player-scope:get'),
   setAudioPlayerScope: (scope: 'all' | 'mine') =>
     ipcRenderer.invoke('audio-player-scope:set', scope),
+  getAutoStartWithArena: () => ipcRenderer.invoke('arena-autostart:get'),
+  setAutoStartWithArena: (enabled: boolean) =>
+    ipcRenderer.invoke('arena-autostart:set', enabled),
 
   selectLogFile: () =>
     ipcRenderer.invoke('log-file:select'),

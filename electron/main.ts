@@ -1,5 +1,14 @@
 import fs from 'node:fs'
-import { app, BrowserWindow, clipboard, dialog, ipcMain } from 'electron'
+import {
+  app,
+  BrowserWindow,
+  clipboard,
+  dialog,
+  ipcMain,
+  Menu,
+  nativeImage,
+  Tray,
+} from 'electron'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import electronUpdater from 'electron-updater'
@@ -35,6 +44,8 @@ import { syncMappedCardVersions } from './services/soundSync'
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const { autoUpdater } = electronUpdater
+const ARENA_STARTUP_ARG = '--start-with-mtga'
+const isArenaStartupLaunch = process.platform === 'win32' && process.argv.includes(ARENA_STARTUP_ARG)
 
 /*
 |--------------------------------------------------------------------------
@@ -43,7 +54,74 @@ const { autoUpdater } = electronUpdater
 */
 
 let mainWindow: BrowserWindow | null = null
+let tray: Tray | null = null
+let isQuitting = false
+let activeWatchedLogFilePath: string | null = null
+let logWatcherInterval: NodeJS.Timeout | null = null
 let databaseStartupWarning = ''
+
+function getLogoPath() {
+  const assetDirectory = app.isPackaged ? '../dist' : '../public'
+  return path.join(__dirname, assetDirectory, 'mtga-sound-logo.png')
+}
+
+function showMainWindow() {
+  if (!mainWindow) return
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+}
+
+function createSystemTray() {
+  if (process.platform !== 'win32') return
+
+  const icon = nativeImage.createFromPath(getLogoPath())
+  if (icon.isEmpty()) {
+    console.error('Não foi possível carregar o ícone da bandeja do sistema.')
+    return
+  }
+
+  tray = new Tray(icon.resize({ width: 16, height: 16 }))
+  tray.setToolTip('MTGA Sound Mod')
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: 'Abrir MTGA Sound Mod', click: showMainWindow },
+    { type: 'separator' },
+    {
+      label: 'Sair',
+      click: () => {
+        isQuitting = true
+        app.quit()
+      },
+    },
+  ]))
+  tray.on('click', showMainWindow)
+  tray.on('double-click', showMainWindow)
+}
+
+function getAutoStartWithArena() {
+  const available = process.platform === 'win32' && app.isPackaged
+  const enabled = available && app.getLoginItemSettings({ args: [ARENA_STARTUP_ARG] }).openAtLogin
+  return { available, enabled }
+}
+
+function setAutoStartWithArena(enabled: boolean) {
+  if (process.platform !== 'win32' || !app.isPackaged) {
+    return { success: false, error: 'Essa opção está disponível na versão instalada para Windows.' }
+  }
+
+  try {
+    app.setLoginItemSettings({
+      openAtLogin: enabled,
+      args: [ARENA_STARTUP_ARG],
+    })
+    return { success: true, enabled: app.getLoginItemSettings({ args: [ARENA_STARTUP_ARG] }).openAtLogin }
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Não foi possível alterar a inicialização automática.',
+    }
+  }
+}
 
 function sendLog(message: string) {
   console.log(message)
@@ -155,6 +233,8 @@ function getSavedLogFilePath(): string | null {
 }
 
 function startWatcher(logFilePath: string) {
+  if (activeWatchedLogFilePath === logFilePath) return
+  if (logWatcherInterval) clearInterval(logWatcherInterval)
   sendLog('🎵 MTGA Sound Mod iniciado...')
 
   if (!fs.existsSync(logFilePath)) {
@@ -162,6 +242,7 @@ function startWatcher(logFilePath: string) {
     return
   }
 
+  activeWatchedLogFilePath = logFilePath
   sendLog(`👀 Monitorando log MTGA: ${logFilePath}`)
 
   let lastSize = fs.statSync(logFilePath).size
@@ -255,7 +336,7 @@ function startWatcher(logFilePath: string) {
     }
   }
 
-  setInterval(() => {
+  logWatcherInterval = setInterval(() => {
     try {
       const stats = fs.statSync(logFilePath)
 
@@ -298,19 +379,70 @@ function startWatcher(logFilePath: string) {
   }, 500)
 }
 
+function monitorArenaLaunch() {
+  if (!isArenaStartupLaunch) return
+
+  let observedPath = findPlayerLogFile()
+  let observedSize = 0
+  let observedMtime = 0
+  if (observedPath) {
+    try {
+      const stats = fs.statSync(observedPath)
+      observedSize = stats.size
+      observedMtime = stats.mtimeMs
+    } catch {
+      observedPath = null
+    }
+  }
+
+  let activated = false
+  const openForArena = (logPath: string) => {
+    if (activated) return
+    activated = true
+    saveMtgaLogFilePath(logPath)
+    startWatcher(logPath)
+    showMainWindow()
+  }
+
+  if (observedPath && observedMtime > 0 && Date.now() - observedMtime < 15000) {
+    openForArena(observedPath)
+    return
+  }
+
+  const monitor = setInterval(() => {
+    const currentPath = findPlayerLogFile()
+    if (!currentPath) return
+
+    try {
+      const stats = fs.statSync(currentPath)
+      const changed = currentPath !== observedPath || stats.size !== observedSize || stats.mtimeMs !== observedMtime
+      observedPath = currentPath
+      observedSize = stats.size
+      observedMtime = stats.mtimeMs
+      if (changed) openForArena(currentPath)
+    } catch {
+      // The Arena log may be replaced while the game starts; retry on the next poll.
+    }
+
+    if (activated || isQuitting) clearInterval(monitor)
+  }, 1500)
+}
+
 /*
 |--------------------------------------------------------------------------
 | WINDOW
 |--------------------------------------------------------------------------
 */
 
-async function createWindow() {
+async function createWindow(show = true) {
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
     minWidth: 1080,
     minHeight: 700,
     title: 'MTGA Sound Mod',
+    icon: getLogoPath(),
+    show,
     backgroundColor: '#0b0d12',
     autoHideMenuBar: true,
     webPreferences: {
@@ -318,6 +450,15 @@ async function createWindow() {
       contextIsolation: true,
     },
   })
+
+  if (process.platform === 'win32') {
+    mainWindow.on('minimize', () => mainWindow?.hide())
+    mainWindow.on('close', (event) => {
+      if (isQuitting) return
+      event.preventDefault()
+      mainWindow?.hide()
+    })
+  }
 
   if (process.env.VITE_DEV_SERVER_URL) {
     await mainWindow.loadURL(
@@ -447,6 +588,13 @@ ipcMain.handle('audio-player-scope:set', (_, scope: unknown) => {
   saveAudioPlayerScope(scope)
   return { success: true, scope }
 })
+ipcMain.handle('arena-autostart:get', () => getAutoStartWithArena())
+ipcMain.handle('arena-autostart:set', (_, enabled: unknown) => {
+  if (typeof enabled !== 'boolean') {
+    return { success: false, error: 'Valor de inicialização inválido.' }
+  }
+  return setAutoStartWithArena(enabled)
+})
 
 ipcMain.handle('log-file:select', async () => {
   const logFilePath = await chooseLogFile()
@@ -467,6 +615,11 @@ ipcMain.handle('log-file:select', async () => {
 
 app.whenReady().then(async () => {
   try {
+    if (process.platform === 'win32') {
+      app.setAppUserModelId('com.guandalini.mtga-sound')
+      createSystemTray()
+    }
+
     sendLog('🚀 Inicializando app...')
 
     try {
@@ -484,7 +637,7 @@ app.whenReady().then(async () => {
     }
 
     registerSoundIpc()
-    await createWindow()
+    await createWindow(!isArenaStartupLaunch)
     if (databaseStartupWarning) sendLog(`⚠️ ${databaseStartupWarning}`)
     checkForApplicationUpdates()
 
@@ -494,8 +647,20 @@ app.whenReady().then(async () => {
       startWatcher(logFilePath)
     }
 
+    monitorArenaLaunch()
+
   } catch (err) {
     console.error(err)
     sendLog('❌ Erro na inicialização')
   }
+})
+
+app.on('before-quit', () => {
+  isQuitting = true
+})
+
+app.on('window-all-closed', () => {
+  if (process.platform === 'darwin') return
+  if (process.platform === 'win32' && tray && !isQuitting) return
+  app.quit()
 })

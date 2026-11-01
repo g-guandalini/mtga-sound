@@ -67,6 +67,16 @@ interface Window {
       error?: string
     }>
 
+    getAutoStartWithArena: () => Promise<{
+      available: boolean
+      enabled: boolean
+    }>
+    setAutoStartWithArena: (enabled: boolean) => Promise<{
+      success: boolean
+      enabled?: boolean
+      error?: string
+    }>
+
     selectLogFile: () => Promise<{
       selected: boolean
     }>
