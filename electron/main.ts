@@ -30,6 +30,11 @@ import {
   getAudioPlayerScope,
   saveAudioPlayerScope,
   type AudioPlayerScope,
+  getAppThemeMode,
+  saveAppThemeMode,
+  type AppThemeMode,
+  getAppVolume,
+  saveAppVolume,
 } from './database/init'
 import { resolveDeckCards, searchCards } from './database/queries'
 import { readSavedArenaDecks } from './services/arenaDeckReader'
@@ -587,6 +592,22 @@ ipcMain.handle('audio-player-scope:set', (_, scope: unknown) => {
   }
   saveAudioPlayerScope(scope)
   return { success: true, scope }
+})
+ipcMain.handle('theme-mode:get', () => getAppThemeMode())
+ipcMain.handle('theme-mode:set', (_, mode: unknown) => {
+  if (mode !== 'dark' && mode !== 'light') {
+    return { success: false, error: 'Tema inválido.' }
+  }
+  saveAppThemeMode(mode as AppThemeMode)
+  return { success: true, mode }
+})
+ipcMain.handle('app-volume:get', () => getAppVolume())
+ipcMain.handle('app-volume:set', (_, volume: unknown) => {
+  if (typeof volume !== 'number' || !Number.isFinite(volume) || volume < 0 || volume > 100) {
+    return { success: false, error: 'O volume deve estar entre 0 e 100.' }
+  }
+  saveAppVolume(volume)
+  return { success: true, volume: getAppVolume() }
 })
 ipcMain.handle('arena-autostart:get', () => getAutoStartWithArena())
 ipcMain.handle('arena-autostart:set', (_, enabled: unknown) => {

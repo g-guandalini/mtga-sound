@@ -57,6 +57,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getAudioPlayerScope: () => ipcRenderer.invoke('audio-player-scope:get'),
   setAudioPlayerScope: (scope: 'all' | 'mine') =>
     ipcRenderer.invoke('audio-player-scope:set', scope),
+  getAppThemeMode: () => ipcRenderer.invoke('theme-mode:get'),
+  setAppThemeMode: (mode: 'dark' | 'light') => ipcRenderer.invoke('theme-mode:set', mode),
+  getAppVolume: () => ipcRenderer.invoke('app-volume:get'),
+  setAppVolume: (volume: number) => ipcRenderer.invoke('app-volume:set', volume),
   getAutoStartWithArena: () => ipcRenderer.invoke('arena-autostart:get'),
   setAutoStartWithArena: (enabled: boolean) =>
     ipcRenderer.invoke('arena-autostart:set', enabled),

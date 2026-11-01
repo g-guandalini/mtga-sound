@@ -67,6 +67,20 @@ interface Window {
       error?: string
     }>
 
+    getAppThemeMode: () => Promise<'dark' | 'light'>
+    setAppThemeMode: (mode: 'dark' | 'light') => Promise<{
+      success: boolean
+      mode?: 'dark' | 'light'
+      error?: string
+    }>
+
+    getAppVolume: () => Promise<number>
+    setAppVolume: (volume: number) => Promise<{
+      success: boolean
+      volume?: number
+      error?: string
+    }>
+
     getAutoStartWithArena: () => Promise<{
       available: boolean
       enabled: boolean

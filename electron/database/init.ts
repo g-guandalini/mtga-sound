@@ -202,11 +202,14 @@ export function saveMtgaLogFilePath(logFilePath: string) {
 
 export type AudioTriggerMode = 'cast' | 'resolution'
 export type AudioPlayerScope = 'all' | 'mine'
+export type AppThemeMode = 'dark' | 'light'
 
 type AppSettings = {
   mtgaLogFilePath?: string
   audioTriggerModes?: Record<string, AudioTriggerMode>
   audioPlayerScope?: AudioPlayerScope
+  themeMode?: AppThemeMode
+  appVolume?: number
   [key: string]: unknown
 }
 
@@ -251,6 +254,31 @@ export function getAudioPlayerScope(): AudioPlayerScope {
 export function saveAudioPlayerScope(scope: AudioPlayerScope) {
   const settings = readAppSettings()
   settings.audioPlayerScope = scope
+  fs.mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true })
+  fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2))
+}
+
+export function getAppThemeMode(): AppThemeMode {
+  return readAppSettings().themeMode === 'light' ? 'light' : 'dark'
+}
+
+export function saveAppThemeMode(mode: AppThemeMode) {
+  const settings = readAppSettings()
+  settings.themeMode = mode
+  fs.mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true })
+  fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2))
+}
+
+export function getAppVolume(): number {
+  const volume = readAppSettings().appVolume
+  return typeof volume === 'number' && Number.isFinite(volume)
+    ? Math.max(0, Math.min(100, Math.round(volume)))
+    : 100
+}
+
+export function saveAppVolume(volume: number) {
+  const settings = readAppSettings()
+  settings.appVolume = Math.max(0, Math.min(100, Math.round(volume)))
   fs.mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true })
   fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2))
 }

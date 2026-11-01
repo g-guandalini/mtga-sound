@@ -16,6 +16,12 @@ const cardTriggerErrors = ref<Record<string, string>>({})
 const audioPlayerScope = ref<'all' | 'mine'>('all')
 const savingAudioPlayerScope = ref(false)
 const audioPlayerScopeError = ref('')
+const themeMode = ref<'dark' | 'light'>('dark')
+const savingThemeMode = ref(false)
+const themeModeError = ref('')
+const appVolume = ref(100)
+const savingAppVolume = ref(false)
+const appVolumeError = ref('')
 const autoStartWithArena = ref({ available: false, enabled: false })
 const savingAutoStartWithArena = ref(false)
 const autoStartWithArenaError = ref('')
@@ -90,11 +96,14 @@ const myInstantsNotice = ref('')
 const selectedCardSaved = ref(false)
 const selectedCardSaveError = ref('')
 let searchTimer: ReturnType<typeof setTimeout> | undefined
+let appVolumeSaveTimer: ReturnType<typeof setTimeout> | undefined
 let searchRequest = 0
 
 onMounted(async () => {
   audioTriggerModes.value = await window.electronAPI.listAudioTriggerModes().catch(() => ({}))
   audioPlayerScope.value = await window.electronAPI.getAudioPlayerScope().catch(() => 'all')
+  themeMode.value = await window.electronAPI.getAppThemeMode().catch(() => 'dark')
+  appVolume.value = await window.electronAPI.getAppVolume().catch(() => 100)
   autoStartWithArena.value = await window.electronAPI.getAutoStartWithArena().catch(() => ({ available: false, enabled: false }))
   const databaseStatus = await window.electronAPI.getDatabaseStatus()
   databaseNotice.value = databaseStatus.warning || (
@@ -166,6 +175,48 @@ async function setAudioPlayerScope(scope: 'all' | 'mine') {
   } finally {
     savingAudioPlayerScope.value = false
   }
+}
+
+async function setThemeMode(mode: 'dark' | 'light') {
+  if (mode === themeMode.value || savingThemeMode.value) return
+  const previousMode = themeMode.value
+  themeMode.value = mode
+  savingThemeMode.value = true
+  themeModeError.value = ''
+  try {
+    const result = await window.electronAPI.setAppThemeMode(mode)
+    if (!result.success) {
+      themeMode.value = previousMode
+      themeModeError.value = result.error || 'Não foi possível salvar o tema.'
+    }
+  } catch {
+    themeMode.value = previousMode
+    themeModeError.value = 'Não foi possível salvar o tema.'
+  } finally {
+    savingThemeMode.value = false
+  }
+}
+
+function setAppVolume(volume: number) {
+  const normalizedVolume = Math.max(0, Math.min(100, Math.round(volume)))
+  appVolume.value = normalizedVolume
+  appVolumeError.value = ''
+  const playbackVolume = normalizedVolume / 100
+  for (const audio of activeAudio) audio.volume = playbackVolume
+  if (myInstantsPreview.value) myInstantsPreview.value.volume = playbackVolume
+
+  if (appVolumeSaveTimer) clearTimeout(appVolumeSaveTimer)
+  appVolumeSaveTimer = setTimeout(async () => {
+    savingAppVolume.value = true
+    try {
+      const result = await window.electronAPI.setAppVolume(normalizedVolume)
+      if (!result.success) appVolumeError.value = result.error || 'Não foi possível salvar o volume.'
+    } catch {
+      appVolumeError.value = 'Não foi possível salvar o volume.'
+    } finally {
+      savingAppVolume.value = false
+    }
+  }, 300)
 }
 
 async function toggleAutoStartWithArena() {
@@ -303,6 +354,7 @@ async function replaceSound(event: Event) {
 
 function playAudio(url: string) {
   const audio = new Audio(url)
+  audio.volume = appVolume.value / 100
   activeAudio.add(audio)
 
   const releaseAudio = () => activeAudio.delete(audio)
@@ -870,6 +922,7 @@ function stopMyInstantsPreview() {
 async function previewMyInstantsSound(sound: any) {
   stopMyInstantsPreview()
   const audio = new Audio(sound.sound)
+  audio.volume = appVolume.value / 100
   myInstantsPreview.value = audio
   audio.addEventListener('ended', () => {
     if (myInstantsPreview.value === audio) myInstantsPreview.value = null
@@ -963,7 +1016,7 @@ async function assignMyInstantsSound(sound: any) {
 </script>
 
 <template>
-  <div class="container">
+  <div class="container" :class="`theme-${themeMode}`">
     <header class="topbar">
       <div class="brandLockup">
         <img src="/mtga-sound-logo.png" alt="" class="brandMark" />
@@ -1401,6 +1454,54 @@ async function assignMyInstantsSound(sound: any) {
             <p>Configure a reprodução dos sons e a inicialização do aplicativo.</p>
           </div>
         </div>
+
+        <section class="themePreferenceCard settingsScopeCard" aria-labelledby="theme-mode-title">
+          <div class="themePreferenceHeading">
+            <div>
+              <h2 id="theme-mode-title">Aparência</h2>
+              <p>Escolha o tema do aplicativo.</p>
+            </div>
+            <span class="themePreferenceStatus">{{ savingThemeMode ? 'Salvando…' : 'Salvo automaticamente' }}</span>
+          </div>
+          <div class="themeModeOptions" role="group" aria-label="Tema do aplicativo">
+            <button type="button" class="themeModeOption" :class="{ selected: themeMode === 'dark' }" :aria-pressed="themeMode === 'dark'" :disabled="savingThemeMode" @click="setThemeMode('dark')">
+              <span class="themeModeIcon darkThemeIcon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20.2 15.2A8.5 8.5 0 0 1 8.8 3.8a8.7 8.7 0 1 0 11.4 11.4Z"/></svg></span>
+              <span><strong>Escuro</strong><small>Confortável em ambientes com pouca luz.</small></span>
+              <i></i>
+            </button>
+            <button type="button" class="themeModeOption" :class="{ selected: themeMode === 'light' }" :aria-pressed="themeMode === 'light'" :disabled="savingThemeMode" @click="setThemeMode('light')">
+              <span class="themeModeIcon lightThemeIcon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></span>
+              <span><strong>Claro</strong><small>Mais contraste em ambientes iluminados.</small></span>
+              <i></i>
+            </button>
+          </div>
+          <p v-if="themeModeError" class="themeModeError" role="alert">{{ themeModeError }}</p>
+        </section>
+
+        <section class="playerScopeSettings settingsVolumeCard settingsScopeCard" aria-labelledby="app-volume-title">
+          <div class="volumeHeading">
+            <div>
+              <h2 id="app-volume-title">Volume dos sons</h2>
+              <p>Ajuste os sons do MTGA Sound sem alterar o volume da música ou de outros aplicativos.</p>
+            </div>
+            <output for="app-volume" aria-live="polite">{{ appVolume }}%</output>
+          </div>
+          <input
+            id="app-volume"
+            class="appVolumeSlider"
+            type="range"
+            min="0"
+            max="100"
+            step="1"
+            :value="appVolume"
+            :aria-valuetext="`${appVolume}%`"
+            aria-label="Volume dos sons do aplicativo"
+            @input="setAppVolume(Number(($event.target as HTMLInputElement).value))"
+          >
+          <div class="volumeRangeLabels" aria-hidden="true"><span>Mudo</span><span>Máximo</span></div>
+          <p v-if="savingAppVolume" class="autoStartStatus">Salvando preferência…</p>
+          <p v-if="appVolumeError" class="audioPlayerScopeError" role="alert">{{ appVolumeError }}</p>
+        </section>
 
         <section class="playerScopeSettings settingsScopeCard" aria-labelledby="player-scope-title">
           <h2 id="player-scope-title">Reproduzir sons de</h2>
@@ -3075,10 +3176,267 @@ button:disabled { cursor: not-allowed; filter: grayscale(0.5); opacity: 0.48; }
 .autoStartSwitch.enabled i { transform: translateX(14px); background: #fff; }
 .autoStartStatus { margin: 0; color: #aaa4b6; font-size: 11px; }
 .audioPlayerScopeError { margin: 0; color: #ef9b9b; font-size: 11px; }
-.settingsPage { display: flex; width: 100%; min-height: 0; flex-direction: column; }
-.settingsHeader { flex: none; }
-.settingsScopeCard { width: min(100%, 700px); margin: 24px auto; padding: 20px; }
+.settingsPage { display: flex; width: 100%; min-height: 0; flex-direction: column; gap: 10px; padding-bottom: 12px; }
+.settingsHeader { width: min(100%, 700px); flex: none; align-self: center; margin: 0 auto 2px; padding: 4px 2px 8px; border-bottom: 0; }
+.settingsScopeCard { box-sizing: border-box; width: min(100%, 700px); margin: 0 auto; padding: 16px; border: 1px solid #30313d; border-radius: 12px; background: #14151c; }
 .settingsScopeCard .playerScopeOption { padding: 13px; }
 .settingsScopeCard .playerScopeOption strong { font-size: 14px; }
 .settingsScopeCard .playerScopeOption small { font-size: 12px; }
+.settingsVolumeCard { gap: 10px; }
+.volumeHeading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.volumeHeading h2 { margin: 0 0 4px; color: #e7e2ef; font-size: 14px; }
+.volumeHeading p { margin: 0; color: #aaa4b6; font-size: 12px; line-height: 1.45; }
+.volumeHeading output { min-width: 52px; padding: 6px 9px; border: 1px solid #50436a; border-radius: 8px; background: #211d2c; color: #e5d9ff; font-size: 14px; font-weight: 750; text-align: center; }
+.appVolumeSlider { width: 100%; height: 22px; margin: 3px 0 0; accent-color: #a88ae9; cursor: pointer; }
+.volumeRangeLabels { display: flex; justify-content: space-between; margin-top: -6px; color: #aaa4b6; font-size: 11px; }
+.themePreferenceCard { display: grid; gap: 12px; }
+.themePreferenceHeading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.themePreferenceHeading h2 { margin: 0; color: #e7e2ef; font-size: 14px; }
+.themePreferenceHeading p { margin: 4px 0 0; color: #aaa4b6; font-size: 12px; }
+.themePreferenceStatus { color: #777381; font-size: 10px; white-space: nowrap; }
+.themeModeOptions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.themeModeOption { display: grid; min-height: 74px; grid-template-columns: 36px minmax(0, 1fr) 14px; align-items: center; gap: 10px; padding: 11px; border: 1px solid #35313f; border-radius: 10px; background: #191820; color: #d7d2df; text-align: left; cursor: pointer; }
+.themeModeOption:hover:not(:disabled) { transform: none; border-color: #5b4d77; background: #211e2c; }
+.themeModeOption.selected { border-color: #8066bd; background: #252033; box-shadow: inset 0 0 0 1px rgba(128, 102, 189, 0.16); }
+.themeModeOption:disabled { cursor: wait; opacity: .7; }
+.themeModeIcon { display: grid; width: 36px; height: 36px; place-items: center; border: 1px solid #40394e; border-radius: 9px; background: #24212d; color: #c2aeff; }
+.themeModeIcon svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.lightThemeIcon { border-color: #554a38; background: #2e291f; color: #f0cb7b; }
+.themeModeOption strong, .themeModeOption small { display: block; }
+.themeModeOption strong { color: #eeeaf5; font-size: 12px; }
+.themeModeOption small { margin-top: 3px; color: #aaa4b6; font-size: 10px; line-height: 1.35; }
+.themeModeOption > i { width: 13px; height: 13px; border: 1px solid #716b7e; border-radius: 50%; }
+.themeModeOption.selected > i { border: 4px solid #b6a0f0; background: #fff; }
+.themeModeError { margin: 0; color: #ef9b9b; font-size: 11px; }
+
+/* Light appearance: explicit surface and text colors keep every view readable. */
+.container.theme-light {
+  background: #f4f5f8;
+  color: #272531;
+}
+
+.theme-light .topbar { background: rgba(255, 255, 255, 0.96); border-bottom-color: #dfe1e8; }
+.theme-light .brandText strong { color: #262431; }
+.theme-light .brandText span, .theme-light .eyebrow, .theme-light .cardMetaLabel { color: #686473; }
+.theme-light .topNavigation button { color: #54515e; }
+.theme-light .topNavigation button:hover { background: #f0eef5; color: #282432; }
+.theme-light .topNavigation button.active { border-color: #d4c8ef; background: #eee9f8; color: #4b347e; }
+.theme-light .statusPill { color: #5d606b; }
+.theme-light .statusReady i { background: #26784f; }
+.theme-light .statusPending i { background: #8a5a00; }
+.theme-light .appFooter { border-top-color: #dfe1e8; color: #5d606b; }
+.theme-light .appFooter a { color: #503a89; }
+
+.theme-light .databaseNotice, .theme-light .logFileNotice { border-color: #e4d3a5; background: #fff8e7; color: #4e3c17; }
+.theme-light .logFileNotice span { color: #62512e; }
+.theme-light .logFileNotice button { background: #79540d; color: #fff; }
+
+.theme-light .content { color: #282632; scrollbar-color: #c8c6d0 transparent; }
+.theme-light .pageHeader h1, .theme-light .managerHeader h1 { color: #262431; }
+.theme-light .pageHeader p, .theme-light .managerHeader p { color: #555966; }
+.theme-light .cardSearchInputWrap { border-color: #d5d4df; background: #fff; box-shadow: 0 2px 8px rgba(34, 29, 52, 0.04); }
+.theme-light .cardSearchInputWrap:focus-within { border-color: #7255b4; box-shadow: 0 0 0 3px rgba(114, 85, 180, 0.15); }
+.theme-light .cardSearchInputWrap svg { stroke: #5c5768; }
+.theme-light .cardSearchInputWrap input { color: #282632; }
+.theme-light .cardSearchInputWrap input::placeholder { color: #686b77; }
+.theme-light .cardSearchAutocomplete { border-color: #d4d1df; background: #fff; box-shadow: 0 18px 40px rgba(39, 34, 56, 0.2); }
+.theme-light .cardAutocompleteMeta { border-bottom-color: #e6e3eb; color: #5e5b68; }
+.theme-light .cardSearchResults .cardRow { color: #363340; }
+.theme-light .cardSearchResults .cardRow:hover { background: #f2eff8; color: #282432; }
+.theme-light .cardSearchResults .cardRow.active { border-color: #d5c8ef; background: #eee9f8; color: #432e74; }
+.theme-light .resultsHint { color: #5d606b; }
+.theme-light .resultsHint strong { color: #34323e; }
+.theme-light .loading { color: #553e91; }
+.theme-light .previewCard { border-color: #d9d7e1; background: linear-gradient(145deg, #fff, #f1f0f5); box-shadow: 0 18px 46px rgba(35, 31, 48, 0.1); }
+.theme-light .cardInfo h2 { color: #24222e; }
+.theme-light .cardDescription, .theme-light .cardTriggerDescription { color: #535662; }
+.theme-light .selectedCardTriggerControl { color: #44424e; }
+.theme-light .emptyState { border-color: #d9d7e1; background: rgba(255, 255, 255, 0.78); color: #565966; }
+.theme-light .emptyState h2 { color: #302d39; }
+
+.theme-light .deckBuilder, .theme-light .soundManager { border-color: #d9dce4; background: #fff; }
+.theme-light .myDecksPanel { scrollbar-color: #c8c6d0 transparent; }
+.theme-light .savedDeckRow { border-color: #d8d4e2; background: linear-gradient(135deg, #fff, #f5f3f8 78%); color: #302d3a; box-shadow: 0 3px 10px rgba(39, 34, 56, 0.04); }
+.theme-light .savedDeckRow:hover { border-color: #9b85ca; background: linear-gradient(135deg, #fff, #f0ebf8 78%); box-shadow: 0 8px 20px rgba(39, 34, 56, 0.11); }
+.theme-light .savedDeckRow strong { color: #292632; }
+.theme-light .savedDeckRow small { color: #555966; }
+.theme-light .savedDeckFormat { border-color: #d2c4eb; background: #eee8f8; color: #49327a; }
+.theme-light .savedDeckOpen { color: #4e3788; }
+.theme-light .deckFormatFilterBar { border-color: #dedbe6; background: linear-gradient(110deg, #f2eef9, #fff 68%); }
+.theme-light .deckFormatFilterIcon { border-color: #d6c9eb; background: #ebe5f5; color: #523b89; }
+.theme-light .deckFormatFilterIntro strong { color: #302d39; }
+.theme-light .deckFormatFilterIntro small { color: #5d5b66; }
+.theme-light .deckFormatSelectWrap select { border-color: #cbc8d5; background: #fff; color: #302d39; }
+.theme-light .deckFormatSelectWrap select:hover { border-color: #8065b4; background: #faf9fc; }
+.theme-light .deckFormatSelectWrap select:focus-visible { border-color: #6548a5; box-shadow: 0 0 0 3px rgba(101, 72, 165, 0.15); }
+.theme-light .deckFormatSelectWrap option { background: #fff; color: #302d39; }
+.theme-light .deckFormatSelectChevron { stroke: #514d5c; }
+.theme-light .deckFormatCount { border-color: #d8d3e1; background: #fff; color: #55515f; }
+.theme-light .deckFormatCount strong { color: #4a347c; }
+.theme-light .manualDeckImport { border-top-color: #e0dfe6; }
+.theme-light .manualDeckImport summary { color: #4d4c58; }
+.theme-light .deckInput { border-color: #cfccd8; background: #fff; color: #2c2935; }
+.theme-light .deckInput:focus { border-color: #7255b4; }
+.theme-light .deckSummary, .theme-light .deckCard, .theme-light .soundRow { border-color: #d9dce4; background: #fff; color: #302d39; box-shadow: 0 2px 8px rgba(39, 34, 56, 0.04); }
+.theme-light .deckSummary strong, .theme-light .deckCardInfo strong, .theme-light .soundDetails strong { color: #292632; }
+.theme-light .deckSummary span, .theme-light .soundDetails span { color: #555966; }
+.theme-light .deckCardError, .theme-light .deckImportError, .theme-light .deckImportWarning { color: #8b2635; }
+.theme-light .deckLogMessage { border-color: #e4c8c1; background: #fff2ef; color: #712d25; }
+.theme-light .deckFilterBar input, .theme-light .soundFilterBar input { border-color: #cbc9d4; background: #fff; color: #292632; }
+.theme-light .deckFilterBar label, .theme-light .deckFilterBar > span, .theme-light .soundFilterBar > span { color: #565966; }
+.theme-light .deckFilterBar input:focus, .theme-light .soundFilterBar input:focus { border-color: #7255b4; }
+.theme-light .managerEmpty { color: #555966; }
+.theme-light .managerEmpty h2 { color: #34323e; }
+
+.theme-light .soundRow { background: #fff; }
+.theme-light .soundImageFallback { border: 1px solid #d8d6df; background: #f0eff4; color: #514d5c; }
+.theme-light .cardTriggerControl { color: #4f4c58; }
+.theme-light .triggerModeGroup { border-color: #d4d1db; background: #f3f2f6; }
+.theme-light .triggerModeButton { color: #4e4b57; }
+.theme-light .triggerModeButton:hover:not(:disabled) { background: #e9e5f1; color: #342a4e; }
+.theme-light .triggerModeButton.selected { border-color: #b9a8d9; background: #e9e1f5; color: #3e2c68; box-shadow: inset 0 0 0 1px rgba(89, 62, 137, 0.12); }
+.theme-light .landTriggerBadge { border-color: #acd4ba; background: #e8f5ec; color: #245b3c; }
+.theme-light .cardTriggerError, .theme-light .audioPlayerScopeError, .theme-light .themeModeError { color: #9a2636; }
+.theme-light .versionBadge { border-color: #d5c9ec; background: #f0ebf8; color: #49327a; }
+
+.theme-light .settingsScopeCard,
+.theme-light .playerScopeSettings { border-color: #d9d6e0; background: #fff; }
+.theme-light .playerScopeSettings h2 { color: #302d39; }
+.theme-light .volumeHeading h2 { color: #302d39; }
+.theme-light .volumeHeading p, .theme-light .volumeRangeLabels { color: #53515e; }
+.theme-light .volumeHeading output { border-color: #c8b9df; background: #f0ebf8; color: #493276; }
+.theme-light .appVolumeSlider { accent-color: #624590; }
+.theme-light .playerScopeOption { color: #494653; }
+.theme-light .playerScopeOption:hover { background: #f4f2f8; }
+.theme-light .playerScopeOption.selected { border-color: #c6b7e2; background: #f0ebf8; color: #34284c; }
+.theme-light .playerScopeOption small { color: #53515e; }
+.theme-light .playerScopeRadio { border-color: #706a7b; }
+.theme-light .playerScopeOption.selected .playerScopeRadio { border-color: #5e438e; }
+.theme-light .playerScopeOption.selected .playerScopeRadio::after { background: #5e438e; }
+.theme-light .themePreferenceHeading h2 { color: #302d39; }
+.theme-light .themePreferenceHeading p, .theme-light .themePreferenceStatus { color: #555966; }
+.theme-light .themeModeOption { border-color: #d8d4df; background: #fff; color: #363340; }
+.theme-light .themeModeOption:hover:not(:disabled) { border-color: #a895c8; background: #f8f6fb; }
+.theme-light .themeModeOption.selected { border-color: #8d72be; background: #f0ebf8; box-shadow: inset 0 0 0 1px rgba(101, 72, 165, 0.12); }
+.theme-light .themeModeOption strong { color: #302d39; }
+.theme-light .themeModeOption small { color: #555966; }
+.theme-light .themeModeIcon { border-color: #d8d0e6; background: #eee9f6; color: #503a86; }
+.theme-light .lightThemeIcon { border-color: #e0c98e; background: #fff5d9; color: #6f4b00; }
+.theme-light .themeModeOption > i { border-color: #716c79; }
+.theme-light .themeModeOption.selected > i { border-color: #553a8c; background: #553a8c; }
+.theme-light .autoStartSwitch { border-color: #9a96a2; background: #e5e3e9; }
+.theme-light .autoStartSwitch i { background: #57525f; }
+.theme-light .autoStartSwitch.enabled { border-color: #64499d; background: #765ab1; }
+.theme-light .autoStartSwitch.enabled i { background: #fff; }
+.theme-light .autoStartStatus { color: #555966; }
+
+.theme-light .cardPreviewOverlay, .theme-light .myInstantsOverlay { background: rgba(31, 29, 39, 0.48); }
+.theme-light .cardPreviewModal, .theme-light .myInstantsModal { border-color: #d5d2dd; background: linear-gradient(145deg, #fff, #f5f4f8); box-shadow: 0 24px 70px rgba(29, 26, 42, 0.25); }
+.theme-light .cardPreviewHeader, .theme-light .myInstantsHeader { border-bottom-color: #e0dee6; }
+.theme-light .cardPreviewHeader h2, .theme-light .myInstantsHeader h2 { color: #292632; }
+.theme-light .cardPreviewHeader span, .theme-light .myInstantsHeader > div > span { color: #514b5f; }
+.theme-light .cardPreviewFooter, .theme-light .myInstantsHeader p { color: #555966; }
+.theme-light .cardPreviewClose, .theme-light .myInstantsBackButton { border-color: #d3d0da; background: #f0eff3; color: #393643; }
+.theme-light .cardPreviewMessage, .theme-light .myInstantsLoading, .theme-light .myInstantsEmpty { color: #555966; }
+.theme-light .soundSourceOption { border-color: #dedbe4; background: #fff; color: #302d39; }
+.theme-light .soundSourceOption:hover { border-color: #b8a8d4; background: #f7f4fb; }
+.theme-light .soundSourceOption small { color: #555966; }
+.theme-light .soundSourceOptionArrow { color: #5f5b68; }
+.theme-light .soundSourceOptionIcon { border-color: #e0d2a6; background: #fff7df; color: #6a4c0b; }
+.theme-light .soundSourcePrimaryButton, .theme-light .myInstantsSearchButton, .theme-light .deckSourceButton { border-color: #6a4c9d; background: #604591; color: #fff; }
+.theme-light .myInstantsSearchButton:hover, .theme-light .deckSourceButton:hover { border-color: #4e347b; background: #50377e; color: #fff; }
+.theme-light .myInstantsSearchForm input { border-color: #cbc8d3; background: #fff; color: #292632; }
+.theme-light .myInstantsSearchForm input:focus { border-color: #7255b4; }
+.theme-light .myInstantsSearchForm button, .theme-light .myInstantsAssignButton { border-color: #684c12; background: #75540f; color: #fff; }
+.theme-light .myInstantsRateHint { color: #595763; }
+.theme-light .myInstantsResult { border-bottom-color: #e4e1e9; }
+.theme-light .myInstantsResultInfo strong { color: #292632; }
+.theme-light .myInstantsResultInfo span { color: #664b16; }
+.theme-light .myInstantsResultInfo small { color: #565966; }
+.theme-light .myInstantsPreviewButton { border-color: #d1ced8; background: #f2f1f5; color: #393643; }
+.theme-light .myInstantsPagination { color: #555966; }
+.theme-light .myInstantsError, .theme-light .selectedCardSourceError { border-color: #e3bfc3; background: #fff0f1; color: #8f2935; }
+.theme-light .myInstantsNotice, .theme-light .myInstantsSuccess { border-color: #b9d9c3; background: #edf8f0; color: #245d39; }
+
+.theme-light .imageVersionArrow { border-color: rgba(255, 255, 255, 0.7); background: rgba(32, 30, 40, 0.78); color: #fff; }
+.theme-light .imageVersionArrow:focus-visible, .theme-light button:focus-visible, .theme-light select:focus-visible, .theme-light input:focus-visible { outline: 2px solid #5f4399; outline-offset: 2px; }
+.theme-light .imageContainer img, .theme-light .cardArtworkFallback { border-color: #d9d6e0; }
+.theme-light .cardArtworkFallback { background: radial-gradient(circle at 50% 35%, #e7e0f2, #f6f4f9 70%); color: #503b7d; }
+.theme-light .uploadControl { border-color: #c9c1d6; background: #faf9fc; color: #393544 !important; }
+.theme-light .uploadControl small { color: #555966; }
+.theme-light .field label { color: #45424e; }
+.theme-light .myInstantsSuccess { color: #24603b; }
+
+/* Secondary controls, notices and feedback states across all views. */
+.theme-light button:disabled { filter: none; opacity: 0.62; }
+.theme-light .secondaryButton,
+.theme-light .myInstantsPreviewButton { border-color: #c9c5d2; background: #f0eef4; color: #393543; }
+.theme-light .secondaryButton:hover:not(:disabled),
+.theme-light .myInstantsPreviewButton:hover:not(:disabled) { border-color: #8d78b3; background: #e8e3f0; }
+.theme-light .deckImportActions button,
+.theme-light .saveButton,
+.theme-light .deckSaveButton,
+.theme-light .myInstantsSearchButton,
+.theme-light .myInstantsAssignButton { border-color: #563b88; background: #604590; color: #fff; }
+.theme-light .deckImportActions button:hover:not(:disabled),
+.theme-light .saveButton:hover:not(:disabled),
+.theme-light .deckSaveButton:hover:not(:disabled),
+.theme-light .myInstantsSearchButton:hover:not(:disabled),
+.theme-light .myInstantsAssignButton:hover:not(:disabled) { background: #4d3479; }
+
+.theme-light .deckMyInstantsGuide { border-color: #d7cbe8; background: linear-gradient(110deg, #f2edf9, #fff); }
+.theme-light .deckMyInstantsGuide strong { color: #42306c; }
+.theme-light .deckMyInstantsGuide span { color: #514e5c; }
+.theme-light .deckImportWarning,
+.theme-light .deckUnresolved { border-color: #e1c79c; background: #fff7e9; color: #563d17; }
+.theme-light .deckUnresolved p { color: #5b554a; }
+.theme-light .deckUnresolved ul { color: #554d42; }
+.theme-light .deckSavedAudio { border-color: #b6d8c2; background: #eff8f1; }
+.theme-light .deckSavedAudio > strong { color: #245b39; }
+.theme-light .deckSavedAudioRow > span { color: #41484a; }
+.theme-light .deckPlaySavedAudio { border-color: #82b293; background: #dcefe2; color: #1d5834; }
+.theme-light .deckPlaySavedAudio:hover { border-color: #508b64; background: #cce6d4; }
+.theme-light .deckAudioSource { border-color: #d8d5df; background: #f7f6f9; }
+.theme-light .deckSourceButton { border-color: #c8c3d2; background: #eeecf3; color: #3e3949; }
+.theme-light .deckSourceButton:hover:not(:disabled) { border-color: #8e79b5; background: #e5e0ef; }
+.theme-light .deckRecentDownloadRow { background: #eeedf2; }
+.theme-light .deckRecentDownloadRow > span { color: #484653; }
+.theme-light .useDownloadButton { border-color: #82b293; background: #dcefe2; color: #1d5834; }
+.theme-light .deckDownloadError { color: #8a3030; }
+.theme-light .deckAudioPicker { border-color: #b8adca; background: #faf9fc; color: #453b57; }
+.theme-light .deckAudioPicker:hover { border-color: #7655af; background: #f0ebf8; }
+.theme-light .viewCardButton { border-color: #b9a9d4; background: #eee9f6; color: #48346f; }
+.theme-light .viewCardButton:hover { border-color: #7658a9; background: #e4dcf1; }
+.theme-light .savedDeckIcon { border-color: #c9bddb; background: radial-gradient(ellipse at 50% 38%, #ebe4f4, #f6f3fa 70%); color: #503b7d; }
+
+.theme-light .soundActionError,
+.theme-light .managerError,
+.theme-light .deckCardError { border-color: #e2bec3; background: #fff0f1; color: #8f2935; }
+.theme-light .soundActionError { border-top-color: #e2bec3; }
+.theme-light .rowSavingStatus { color: #503a80; }
+.theme-light .iconActionButton { border-color: #cfccd7; background: #f1eff5; color: #413d4b; }
+.theme-light .iconActionButton:hover { border-color: #8d78b3; background: #e9e4f1; }
+.theme-light .playActionButton { border-color: #9dc9ad; background: #e4f3e8; color: #245b39; }
+.theme-light .playActionButton:hover { border-color: #5c9b70; background: #d4ebdb; }
+.theme-light .uploadActionButton { border-color: #c4b5df; background: #eee9f6; color: #4c367b; }
+.theme-light .uploadActionButton:hover { border-color: #876ab7; background: #e3daf1; }
+.theme-light .deleteActionButton,
+.theme-light .soundActions .danger { border-color: #dfb8bf; background: #fff0f1; color: #8b2937; }
+.theme-light .deleteActionButton:hover,
+.theme-light .soundActions .danger:hover { border-color: #bb6673; background: #f9dfe2; }
+.theme-light .iconActionButton[data-tooltip]::after { border-color: #d6d2dd; background: #fff; color: #292632; box-shadow: 0 4px 14px rgba(34, 29, 52, 0.16); }
+.theme-light .triggerModeGroup { background: #f3f2f6; }
+.theme-light .themePreferenceStatus { color: #4e4b57; }
+.theme-light .myInstantsResultInfo span { color: #62450b; }
+.theme-light .myInstantsPagination button { border-color: #c9c5d2; background: #f0eef4; color: #393543; }
+.theme-light .myInstantsPagination button:hover:not(:disabled) { border-color: #8d78b3; background: #e8e3f0; }
+.theme-light .cardPreviewError { color: #8f2935; }
+.theme-light .managerHeader { border-bottom-color: #dfe1e8; }
+.theme-light .manualDeckImport summary:hover { color: #38275c; }
+.theme-light :is(input, textarea, select)::placeholder { color: #686572; opacity: 1; }
+.theme-light :is(button, a, input, textarea, select):focus-visible { outline: 2px solid #5f4399; outline-offset: 2px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .theme-light *, .theme-light *::before, .theme-light *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+}
 </style>
