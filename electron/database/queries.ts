@@ -59,9 +59,72 @@ export function searchCards(search: string) {
 export function getCardVersions(name: string) {
   return getDb()
     .prepare(`
-      SELECT grp_id
+      SELECT grp_id, set_code, collector_number, is_land
       FROM cards
       WHERE name = ?
+      ORDER BY set_code, collector_number
     `)
     .all(name)
+}
+
+export type ArenaDeckEntry = {
+  quantity: number
+  name: string
+  setCode: string
+  collectorNumber: string
+  section?: 'main' | 'sideboard'
+}
+
+export function resolveDeckCards(entries: ArenaDeckEntry[]) {
+  const db = getDb()
+  const findByPrinting = db.prepare(`
+    SELECT name
+    FROM cards
+    WHERE set_code = ? COLLATE NOCASE
+      AND collector_number = ? COLLATE NOCASE
+    LIMIT 1
+  `)
+  const findByName = db.prepare(`
+    SELECT name
+    FROM cards
+    WHERE name = ? COLLATE NOCASE
+    LIMIT 1
+  `)
+  const getVersions = db.prepare(`
+    SELECT grp_id, set_code, collector_number, is_land
+    FROM cards
+    WHERE name = ?
+    ORDER BY set_code, collector_number
+  `)
+
+  return entries.map((entry) => {
+    const exactPrinting = findByPrinting.get(
+      entry.setCode,
+      entry.collectorNumber
+    ) as { name: string } | undefined
+
+    if (exactPrinting && normalize(exactPrinting.name) !== normalize(entry.name)) {
+      return { ...entry, found: false, reason: 'language' }
+    }
+
+    const card = exactPrinting ?? findByName.get(entry.name) as { name: string } | undefined
+    if (!card) return { ...entry, found: false, reason: 'missing' }
+
+    const versions = getVersions.all(card.name) as Array<{
+      grp_id: number
+      set_code: string | null
+      collector_number: string | null
+      is_land: number
+    }>
+
+    return {
+      ...entry,
+      found: true,
+      cardName: card.name,
+      grpIds: versions.map((version) => version.grp_id),
+      isLand: versions.some((version) => version.is_land === 1),
+      versions,
+      exactPrintingFound: Boolean(exactPrinting),
+    }
+  })
 }

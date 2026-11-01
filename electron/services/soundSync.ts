@@ -1,8 +1,3 @@
-import fs from 'node:fs'
-import path from 'node:path'
-
-import { USER_DATA_DIR } from './paths'
-
 import { getDb } from '../database/init'
 import {
   getSoundMap,
@@ -54,32 +49,4 @@ export function syncMappedCardVersions() {
   }
 
   return { added, cards: mappedNames.size }
-}
-
-export function getDatabaseMetadataPath() {
-  return path.join(USER_DATA_DIR, 'database-metadata.json')
-}
-
-export type DatabaseMetadata = {
-  etag?: string
-  lastModified?: string
-  contentLength?: string
-  checkedAt?: string
-}
-
-export function readDatabaseMetadata(): DatabaseMetadata | null {
-  try {
-    return JSON.parse(
-      fs.readFileSync(getDatabaseMetadataPath(), 'utf8')
-    ) as DatabaseMetadata
-  } catch {
-    return null
-  }
-}
-
-export function saveDatabaseMetadata(metadata: DatabaseMetadata) {
-  fs.writeFileSync(
-    getDatabaseMetadataPath(),
-    JSON.stringify(metadata, null, 2)
-  )
 }

@@ -25,6 +25,7 @@ function steamLibraryRoots() {
     homePath('.steam', 'steam'),
     homePath('.steam', 'root'),
     homePath('.local', 'share', 'Steam'),
+    homePath('snap', 'steam', 'common', '.local', 'share', 'Steam'),
     homePath('.var', 'app', 'com.valvesoftware.Steam', '.local', 'share', 'Steam'),
   ]
   const libraries = [...steamRoots]

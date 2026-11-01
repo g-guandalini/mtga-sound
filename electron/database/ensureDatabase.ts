@@ -1,16 +1,9 @@
-import fs from 'node:fs'
-import path from 'node:path'
-import { app } from 'electron'
-
-export const DB_PATH = path.join(
-  app.getPath('userData'),
-  'database.sqlite'
-)
+import { getArenaDatabasePath } from './init'
 
 export function ensureDatabaseExists() {
-  if (!fs.existsSync(DB_PATH)) {
+  if (!getArenaDatabasePath()) {
     throw new Error(
-      'Database não encontrado. Reinicie o app.'
+      'Banco de cartas do MTG Arena não encontrado. Abra/instale o Arena e reinicie o app.'
     )
   }
 }

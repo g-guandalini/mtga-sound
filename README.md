@@ -40,13 +40,13 @@ npm run release
 
 ## Dados do usuário
 
-O banco baixado, os mapeamentos de sons, os arquivos de áudio e as configurações ficam no diretório de dados do Electron (`app.getPath('userData')`). Assim, reinstalações e atualizações não devem apagar os sons do usuário.
+Os mapeamentos de sons, os arquivos de áudio e as configurações ficam no diretório de dados do Electron (`app.getPath('userData')`). O catálogo é lido diretamente da instalação do Arena e não é copiado para a pasta do app.
 
 A primeira execução após esta mudança migra automaticamente o `data/soundMap.json` e a pasta `sounds` da instalação anterior, quando encontrados.
 
-## Atualização da base de cartas
+## Banco de cartas
 
-O aplicativo baixa a base no primeiro início. Quando o CDN não fornece validadores HTTP (`ETag` ou `Last-Modified`), ele baixa o SQLite no máximo uma vez a cada 24 horas para evitar transferir o mesmo arquivo em toda abertura. Se o CDN estiver indisponível, uma base local existente continua sendo usada. Sem uma base local, o aplicativo abre e informa que a busca de cartas ficará indisponível até o download funcionar.
+O aplicativo lê em modo somente leitura o `Raw_CardDatabase` instalado pelo MTG Arena. O banco é localizado automaticamente nas instalações comuns do Steam e do Windows. Quando o Arena atualiza esse arquivo, o aplicativo usa os dados novos na próxima abertura. O catálogo do CDN do projeto não é mais necessário. Para imagens, a interface continua consultando a API do Scryfall.
 
 ## Assinatura
 

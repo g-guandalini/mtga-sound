@@ -1,9 +1,8 @@
 import fs from 'node:fs'
-import { app, BrowserWindow, dialog, ipcMain } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain } from 'electron'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import electronUpdater from 'electron-updater'
-import { USER_DATA_DIR } from './services/paths'
 import {
   findPlayerLogFile,
   getLogPickerDefaultPath,
@@ -15,14 +14,17 @@ import {
   getDb,
   getMtgaLogFilePath,
   saveMtgaLogFilePath,
-  closeDb,
+  getArenaDatabasePath,
+  getAudioTriggerModes,
+  saveAudioTriggerMode,
+  type AudioTriggerMode,
+  getAudioPlayerScope,
+  saveAudioPlayerScope,
+  type AudioPlayerScope,
 } from './database/init'
-import { searchCards } from './database/queries'
-import {
-  readDatabaseMetadata,
-  saveDatabaseMetadata,
-  syncMappedCardVersions,
-} from './services/soundSync'
+import { resolveDeckCards, searchCards } from './database/queries'
+import { readSavedArenaDecks } from './services/arenaDeckReader'
+import { syncMappedCardVersions } from './services/soundSync'
 
 /*
 |--------------------------------------------------------------------------
@@ -33,27 +35,6 @@ import {
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const { autoUpdater } = electronUpdater
-
-/*
-|--------------------------------------------------------------------------
-| DB
-|--------------------------------------------------------------------------
-*/
-
-const DB_URL =
-  'https://cdn.guandalini.uk/mtga-sound/database.sqlite'
-
-// The current CDN response does not expose ETag or Last-Modified on HEAD.
-// Until the publisher exposes a reliable version validator, avoid downloading
-// the same database on every application launch.
-const DATABASE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
-const DATABASE_HEAD_TIMEOUT_MS = 8_000
-const DATABASE_DOWNLOAD_TIMEOUT_MS = 15_000
-
-const DB_PATH = path.join(
-  USER_DATA_DIR,
-  'database.sqlite'
-)
 
 /*
 |--------------------------------------------------------------------------
@@ -70,125 +51,6 @@ function sendLog(message: string) {
   if (mainWindow) {
     mainWindow.webContents.send('log', message)
   }
-}
-
-/*
-|--------------------------------------------------------------------------
-| DOWNLOAD DB
-|--------------------------------------------------------------------------
-*/
-
-async function downloadDatabaseIfChanged() {
-  const metadata = readDatabaseMetadata()
-  let remoteMetadata: {
-    etag?: string
-    lastModified?: string
-    contentLength?: string
-  } = {}
-  let headUnavailable = false
-
-  try {
-    const head = await fetch(DB_URL, {
-      method: 'HEAD',
-      signal: AbortSignal.timeout(DATABASE_HEAD_TIMEOUT_MS),
-    })
-
-    if (head.ok) {
-      remoteMetadata = {
-        etag: head.headers.get('etag') ?? undefined,
-        lastModified: head.headers.get('last-modified') ?? undefined,
-        contentLength: head.headers.get('content-length') ?? undefined,
-      }
-    } else {
-      headUnavailable = head.status !== 405 && head.status !== 501
-      sendLog(`⚠️ HEAD da database retornou HTTP ${head.status}; verificando a base local ou tentando download`)
-    }
-  } catch (error) {
-    headUnavailable = true
-    sendLog(`⚠️ Não foi possível consultar os metadados da database; usando a base local se disponível`)
-    console.error(error)
-  }
-
-  const hasValidator = Boolean(
-    remoteMetadata.etag || remoteMetadata.lastModified
-  )
-  const hasLocalDatabase = fs.existsSync(DB_PATH)
-
-  if (hasLocalDatabase && headUnavailable) {
-    databaseStartupWarning = 'Não foi possível consultar o CDN. O aplicativo está usando a cópia local da base de cartas.'
-    sendLog('⚠️ CDN indisponível; mantendo a database local')
-    return false
-  }
-
-  const lastCheckedAt = metadata?.checkedAt
-    ? Date.parse(metadata.checkedAt)
-    : NaN
-  const checkAge = Date.now() - lastCheckedAt
-  const checkedRecently =
-    Number.isFinite(lastCheckedAt) &&
-    checkAge >= 0 &&
-    checkAge < DATABASE_CHECK_INTERVAL_MS
-
-  if (hasLocalDatabase && !hasValidator && checkedRecently) {
-    sendLog('✅ Database local verificada nas últimas 24 horas; mantendo a cópia local')
-    return false
-  }
-
-  const isUnchanged =
-    hasLocalDatabase &&
-    metadata &&
-    hasValidator &&
-    (!remoteMetadata.etag || remoteMetadata.etag === metadata.etag) &&
-    (!remoteMetadata.lastModified || remoteMetadata.lastModified === metadata.lastModified) &&
-    (!remoteMetadata.contentLength || remoteMetadata.contentLength === metadata.contentLength)
-
-  if (isUnchanged && metadata) {
-    saveDatabaseMetadata({ ...metadata, checkedAt: new Date().toISOString() })
-    sendLog('✅ Database local já está atualizado')
-    return false
-  }
-
-  sendLog('📦 Baixando database SQLite...')
-
-  const res = await fetch(DB_URL, {
-    signal: AbortSignal.timeout(DATABASE_DOWNLOAD_TIMEOUT_MS),
-  })
-
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status}`)
-  }
-
-  const buffer = Buffer.from(await res.arrayBuffer())
-
-  remoteMetadata = {
-    etag: remoteMetadata.etag ?? res.headers.get('etag') ?? undefined,
-    lastModified:
-      remoteMetadata.lastModified ?? res.headers.get('last-modified') ?? undefined,
-    contentLength:
-      remoteMetadata.contentLength ?? res.headers.get('content-length') ?? undefined,
-  }
-
-  fs.mkdirSync(path.dirname(DB_PATH), {
-    recursive: true,
-  })
-
-  closeDb()
-  fs.writeFileSync(DB_PATH, buffer)
-  saveDatabaseMetadata({ ...remoteMetadata, checkedAt: new Date().toISOString() })
-
-  sendLog('✅ Database baixado com sucesso')
-  return true
-}
-
-async function updateDatabaseAndSounds() {
-  const databaseUpdated = await downloadDatabaseIfChanged()
-
-  if (!databaseUpdated) return
-
-  const result = syncMappedCardVersions()
-  sendLog(
-    `🔊 Mapeamento de sons atualizado: ${result.added} nova(s) versão(ões) em ${result.cards} carta(s)`
-  )
 }
 
 /*
@@ -231,7 +93,21 @@ function toAudioDataUrl(filePath: string) {
 |--------------------------------------------------------------------------
 */
 
-const recentResolutions = new Set<number>()
+const recentTriggeredInstances = new Set<number>()
+const cardInfoCache = new Map<number, { name: string; isLand: boolean }>()
+
+function getCardInfoForGrpId(grpId: number) {
+  const cached = cardInfoCache.get(grpId)
+  if (cached) return cached
+
+  const row = getDb()
+    .prepare('SELECT name, is_land FROM cards WHERE grp_id = ? LIMIT 1')
+    .get(grpId) as { name?: string; is_land?: number } | undefined
+  if (!row?.name) return null
+  const info = { name: row.name, isLand: row.is_land === 1 }
+  cardInfoCache.set(grpId, info)
+  return info
+}
 
 async function chooseLogFile(): Promise<string | null> {
   const result = await dialog.showOpenDialog(mainWindow!, {
@@ -308,39 +184,64 @@ function startWatcher(logFilePath: string) {
           const state = message.gameStateMessage
           if (!state) continue
 
-          const grpByInstance = new Map<number, number>()
+          const grpByInstance = new Map<number, { grpId: number; controllerSeatId?: number }>()
 
           for (const gameObject of state.gameObjects ?? []) {
             if (
               typeof gameObject.instanceId === 'number' &&
               typeof gameObject.grpId === 'number'
             ) {
-              grpByInstance.set(gameObject.instanceId, gameObject.grpId)
+              grpByInstance.set(gameObject.instanceId, {
+                grpId: gameObject.grpId,
+                controllerSeatId: typeof gameObject.controllerSeatId === 'number'
+                  ? gameObject.controllerSeatId
+                  : undefined,
+              })
             }
           }
+
+          const audioTriggerModes = getAudioTriggerModes()
+          const playerScope: AudioPlayerScope = getAudioPlayerScope()
+          const localSeatIds = Array.isArray(message.systemSeatIds)
+            ? new Set<number>(message.systemSeatIds.filter((seatId: unknown): seatId is number => typeof seatId === 'number'))
+            : new Set<number>()
 
           for (const annotation of state.annotations ?? []) {
             const category = annotation.details?.find(
               (detail: any) => detail.key === 'category'
             )?.valueString?.[0]
-
-            if (category !== 'Resolve') continue
+            if (category !== 'Resolve' && category !== 'Cast' && category !== 'CastSpell' && category !== 'PlayLand') continue
 
             const instanceId = annotation.affectedIds?.[0]
-            const grpId = grpByInstance.get(instanceId)
+            const gameObject = grpByInstance.get(instanceId)
+            const grpId = gameObject?.grpId
 
             if (
               typeof instanceId !== 'number' ||
-              typeof grpId !== 'number' ||
-              recentResolutions.has(instanceId)
+              typeof grpId !== 'number'
             ) {
               continue
             }
 
-            recentResolutions.add(instanceId)
-            sendLog(
-              `✨ RESOLUÇÃO detectada: ${instanceId} -> grp ${grpId}`
-            )
+            if (playerScope === 'mine' && (
+              typeof gameObject?.controllerSeatId !== 'number' ||
+              !localSeatIds.has(gameObject.controllerSeatId)
+            )) continue
+
+            const cardInfo = getCardInfoForGrpId(grpId)
+            const cardName = cardInfo?.name
+            const triggerMode: AudioTriggerMode = cardName
+              ? audioTriggerModes[cardName.trim().toLocaleLowerCase('en-US')] ?? 'resolution'
+              : 'resolution'
+            const isSelectedTrigger = cardInfo?.isLand
+              ? category === 'PlayLand'
+              : category !== 'PlayLand' && (triggerMode === 'resolution'
+                ? category === 'Resolve'
+                : category === 'Cast' || category === 'CastSpell')
+            if (!isSelectedTrigger || recentTriggeredInstances.has(instanceId)) continue
+
+            recentTriggeredInstances.add(instanceId)
+            sendLog(`✨ ${cardInfo?.isLand ? 'TERRENO JOGADO' : category === 'Resolve' ? 'RESOLUÇÃO' : 'CONJURAÇÃO'} detectada: ${instanceId} -> grp ${grpId}`)
             playCardSound(grpId)
           }
         }
@@ -349,14 +250,19 @@ function startWatcher(logFilePath: string) {
       }
     }
 
-    if (recentResolutions.size > 500) {
-      recentResolutions.clear()
+    if (recentTriggeredInstances.size > 500) {
+      recentTriggeredInstances.clear()
     }
   }
 
   setInterval(() => {
     try {
       const stats = fs.statSync(logFilePath)
+
+      if (stats.size < lastSize) {
+        lastSize = 0
+        pendingLog = ''
+      }
 
       if (stats.size <= lastSize) return
 
@@ -372,6 +278,14 @@ function startWatcher(logFilePath: string) {
       })
 
       stream.on('end', () => {
+        if (
+          chunk.includes('"DeckSummaries"') ||
+          chunk.includes('"DecksInternal"') ||
+          chunk.includes('<== Deck.GetDeckListsV3')
+        ) {
+          mainWindow?.webContents.send('arena-decks-updated')
+        }
+
         if (chunk.length > 0) {
           processChunk(chunk)
         }
@@ -394,6 +308,11 @@ async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
+    minWidth: 1080,
+    minHeight: 700,
+    title: 'MTGA Sound Mod',
+    backgroundColor: '#0b0d12',
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.mjs'),
       contextIsolation: true,
@@ -469,23 +388,65 @@ ipcMain.handle(
     return db
       .prepare(
         `
-      SELECT grp_id
+      SELECT grp_id, set_code, collector_number, is_land
       FROM cards
       WHERE name = ?
+      ORDER BY set_code, collector_number
     `
       )
       .all(name)
   }
 )
 
+ipcMain.handle('cards:resolve-deck', (_, entries) => resolveDeckCards(entries))
+ipcMain.handle('clipboard:read-text', () => clipboard.readText())
+ipcMain.handle('decks:saved-from-log', () => {
+  try {
+    const logFilePath = getSavedLogFilePath()
+    if (!logFilePath) throw new Error('Selecione o Player.log do Arena antes de carregar os decks salvos.')
+    return { success: true, decks: readSavedArenaDecks(logFilePath) }
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Não foi possível ler os decks do Player.log.',
+    }
+  }
+})
+
 ipcMain.handle('log-file:status', () => ({
   selected: Boolean(getSavedLogFilePath()),
 }))
 
-ipcMain.handle('database:status', () => ({
-  available: fs.existsSync(DB_PATH),
-  warning: databaseStartupWarning,
-}))
+ipcMain.handle('database:status', () => {
+  const available = Boolean(getArenaDatabasePath())
+  return {
+    available,
+    warning: available ? '' : databaseStartupWarning,
+  }
+})
+
+ipcMain.handle('audio-trigger:list', () => getAudioTriggerModes())
+ipcMain.handle('audio-trigger:set', (_, data: { cardName?: unknown; mode?: unknown }) => {
+  const cardName = typeof data?.cardName === 'string' ? data.cardName.trim() : ''
+  const mode = data?.mode
+  if (!cardName) {
+    return { success: false, error: 'O nome da carta é obrigatório.' }
+  }
+  if (mode !== 'cast' && mode !== 'resolution') {
+    return { success: false, error: 'Modo de reprodução inválido.' }
+  }
+  saveAudioTriggerMode(cardName, mode)
+  return { success: true, cardName, mode }
+})
+
+ipcMain.handle('audio-player-scope:get', () => getAudioPlayerScope())
+ipcMain.handle('audio-player-scope:set', (_, scope: unknown) => {
+  if (scope !== 'all' && scope !== 'mine') {
+    return { success: false, error: 'Escopo de jogador inválido.' }
+  }
+  saveAudioPlayerScope(scope)
+  return { success: true, scope }
+})
 
 ipcMain.handle('log-file:select', async () => {
   const logFilePath = await chooseLogFile()
@@ -508,17 +469,18 @@ app.whenReady().then(async () => {
   try {
     sendLog('🚀 Inicializando app...')
 
-    fs.mkdirSync(path.dirname(DB_PATH), {
-      recursive: true,
-    })
-
     try {
-      await updateDatabaseAndSounds()
+      const databasePath = getArenaDatabasePath()
+      if (!databasePath) throw new Error('Banco do Arena não encontrado.')
+      getDb()
+      const result = syncMappedCardVersions()
+      sendLog(`🃏 Banco do Arena carregado: ${databasePath}`)
+      if (result.added > 0) {
+        sendLog(`🔊 Mapeamento de sons atualizado: ${result.added} nova(s) versão(ões) em ${result.cards} carta(s)`)
+      }
     } catch (error) {
-      console.error('Não foi possível atualizar a database:', error)
-      databaseStartupWarning = fs.existsSync(DB_PATH)
-        ? 'Não foi possível atualizar a base de cartas. O aplicativo está usando a cópia local.'
-        : 'Não foi possível baixar a base de cartas. Conecte-se à internet e reinicie o aplicativo para habilitar a busca.'
+      console.error('Não foi possível carregar o banco do Arena:', error)
+      databaseStartupWarning = 'Não encontrei o banco de cartas do Arena. Abra/instale o Arena e reinicie o aplicativo para habilitar a busca.'
     }
 
     registerSoundIpc()
