@@ -13,7 +13,52 @@ import { USER_DATA_DIR } from '../services/paths'
 
 const SOUNDS_DIR = path.join(USER_DATA_DIR, 'sounds')
 const SOUND_LIBRARY_FILE = path.join(USER_DATA_DIR, 'data', 'soundLibrary.json')
+const EVENT_SOUNDS_FILE = path.join(USER_DATA_DIR, 'data', 'eventSounds.json')
+const EVENT_SOUND_IDS = ['defeat', 'victory', 'damage-taken', 'damage-dealt', 'life-gained', 'creature-died', 'spell-countered'] as const
 const soundHashCache = new Map<string, { size: number; modifiedAt: number; hash: string }>()
+
+export type EventSoundId = typeof EVENT_SOUND_IDS[number]
+type EventSoundMap = Partial<Record<EventSoundId, string>>
+const EVENT_SOUND_LABELS: Record<EventSoundId, string> = {
+  defeat: 'Derrota',
+  victory: 'Vitória',
+  'damage-taken': 'Sofrer dano',
+  'damage-dealt': 'Causar dano',
+  'life-gained': 'Ganhar vida',
+  'creature-died': 'Criatura morreu',
+  'spell-countered': 'Mágica anulada',
+}
+
+function readEventSoundMap(): EventSoundMap {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(EVENT_SOUNDS_FILE, 'utf8'))
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+    return Object.fromEntries(Object.entries(parsed).filter(([id, value]) =>
+      EVENT_SOUND_IDS.includes(id as EventSoundId) && typeof value === 'string'
+    )) as EventSoundMap
+  } catch {
+    return {}
+  }
+}
+
+function writeEventSoundMap(map: EventSoundMap) {
+  fs.mkdirSync(path.dirname(EVENT_SOUNDS_FILE), { recursive: true })
+  fs.writeFileSync(EVENT_SOUNDS_FILE, JSON.stringify(map, null, 2))
+}
+
+function getEventSoundPath(soundPath: string) {
+  if (typeof soundPath !== 'string' || !soundPath.startsWith('sounds/')) return null
+  const resolved = path.resolve(USER_DATA_DIR, soundPath)
+  const relative = path.relative(path.resolve(SOUNDS_DIR), resolved)
+  return relative && !relative.startsWith('..') && !path.isAbsolute(relative) ? resolved : null
+}
+
+export function getEventSoundFile(eventId: EventSoundId) {
+  if (!EVENT_SOUND_IDS.includes(eventId)) return null
+  const soundPath = readEventSoundMap()[eventId]
+  const fullPath = soundPath ? getEventSoundPath(soundPath) : null
+  return fullPath && fs.existsSync(fullPath) ? fullPath : null
+}
 
 function isTrustedMyInstantsUrl(value: string) {
   try {
@@ -32,7 +77,7 @@ type ManagedSound = {
   isLand: boolean
 }
 
-type SoundLibraryMetadata = Record<string, { favorite?: boolean; tags?: string[] }>
+type SoundLibraryMetadata = Record<string, { favorite?: boolean; tags?: string[]; displayName?: string }>
 
 function getCardInfo(grpId: number): { name: string; is_land: number } | undefined {
   return getDb()
@@ -99,7 +144,7 @@ function writeSoundLibraryMetadata(metadata: SoundLibraryMetadata) {
 }
 
 function removeUnreferencedSoundFiles(soundPaths: Set<string>, soundMap: Record<string, string>) {
-  const remainingPaths = new Set(Object.values(soundMap))
+  const remainingPaths = new Set([...Object.values(soundMap), ...Object.values(readEventSoundMap())])
   for (const soundPath of soundPaths) {
     if (remainingPaths.has(soundPath)) continue
     const fullPath = getManagedSoundFile(soundPath)
@@ -179,6 +224,7 @@ export function registerSoundIpc() {
               name: item.name,
               slug: item.slug,
               sound: item.sound,
+              duration: Number.isFinite(Number(item.duration)) && Number(item.duration) > 0 ? Number(item.duration) : null,
               description: typeof item.description === 'string' ? item.description : '',
               tags: typeof item.tags === 'string' ? item.tags : '',
               pageUrl: `https://www.myinstants.com/en/instant/${encodeURIComponent(item.slug)}/`,
@@ -307,6 +353,109 @@ export function registerSoundIpc() {
       .sort((a, b) => a.cardName.localeCompare(b.cardName))
   })
 
+  ipcMain.handle('event-sounds:list', () => {
+    const eventSounds = readEventSoundMap()
+    const metadata = readSoundLibraryMetadata()
+    return EVENT_SOUND_IDS.flatMap((eventId) => {
+      const soundPath = eventSounds[eventId]
+      const fullPath = soundPath ? getEventSoundPath(soundPath) : null
+      return fullPath && fs.existsSync(fullPath)
+        ? [{ eventId, soundFile: metadata[soundPath!]?.displayName || EVENT_SOUND_LABELS[eventId] }]
+        : []
+    })
+  })
+
+  ipcMain.handle('event-sound:save', (_, data: { eventId: EventSoundId; filePath: string }) => {
+    try {
+      if (!EVENT_SOUND_IDS.includes(data?.eventId)) throw new Error('Evento inválido.')
+      const sourcePath = path.resolve(String(data?.filePath ?? ''))
+      const extension = path.extname(sourcePath).toLowerCase()
+      if (!['.mp3', '.wav', '.ogg'].includes(extension) || !fs.existsSync(sourcePath)) {
+        throw new Error('Selecione um arquivo MP3, WAV ou OGG existente.')
+      }
+
+      fs.mkdirSync(SOUNDS_DIR, { recursive: true })
+      const soundFile = `event-${data.eventId}${extension}`
+      const relativePath = `sounds/${soundFile}`
+      const eventSounds = readEventSoundMap()
+      fs.copyFileSync(sourcePath, path.join(SOUNDS_DIR, soundFile))
+      eventSounds[data.eventId] = relativePath
+      writeEventSoundMap(eventSounds)
+      const metadata = readSoundLibraryMetadata()
+      metadata[relativePath] = { ...metadata[relativePath], displayName: path.basename(sourcePath) }
+      writeSoundLibraryMetadata(metadata)
+      return { success: true, eventId: data.eventId, soundFile, displayName: path.basename(sourcePath) }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Não foi possível salvar o som do evento.' }
+    }
+  })
+
+  ipcMain.handle('myinstants:assign-event', async (_, data: { eventId: EventSoundId; soundUrl: string; displayName?: string }) => {
+    try {
+      if (!EVENT_SOUND_IDS.includes(data?.eventId)) throw new Error('Evento inválido.')
+      if (!isTrustedMyInstantsUrl(data.soundUrl)) throw new Error('O endereço do áudio não é válido para o MyInstants.')
+
+      const response = await axios.get<ArrayBuffer>(data.soundUrl, {
+        responseType: 'arraybuffer',
+        headers: { 'User-Agent': 'MTGA-Sound/1.0' },
+        timeout: 20_000,
+        maxContentLength: 20 * 1024 * 1024,
+        maxRedirects: 0,
+      })
+      const audio = Buffer.from(response.data)
+      if (!audio.length) throw new Error('O arquivo de áudio baixado está vazio.')
+
+      const contentType = String(response.headers['content-type'] || '').toLowerCase()
+      const urlPath = new URL(data.soundUrl).pathname.toLowerCase()
+      const extension = urlPath.endsWith('.ogg') || contentType.includes('ogg') ? '.ogg' : '.mp3'
+      fs.mkdirSync(SOUNDS_DIR, { recursive: true })
+      const soundFile = `event-${data.eventId}${extension}`
+      const relativePath = `sounds/${soundFile}`
+      const eventSounds = readEventSoundMap()
+      const previousPath = eventSounds[data.eventId]
+      fs.writeFileSync(path.join(SOUNDS_DIR, soundFile), audio)
+      eventSounds[data.eventId] = relativePath
+      writeEventSoundMap(eventSounds)
+      const displayName = String(data.displayName ?? '').trim().replace(/[\u0000-\u001f]/g, '').slice(0, 160) || soundFile
+      const metadata = readSoundLibraryMetadata()
+      metadata[relativePath] = { ...metadata[relativePath], displayName }
+      writeSoundLibraryMetadata(metadata)
+      const previousFile = previousPath ? getEventSoundPath(previousPath) : null
+      if (previousFile && previousPath && previousPath !== relativePath && !Object.values(getSoundMap()).includes(previousPath) && !Object.values(eventSounds).includes(previousPath)) {
+        try { fs.unlinkSync(previousFile) } catch { /* cleanup failure does not undo the saved event sound */ }
+      }
+      return { success: true, eventId: data.eventId, soundFile, displayName }
+    } catch (error) {
+      return {
+        success: false,
+        error: axios.isAxiosError(error) && error.code === 'ERR_BAD_RESPONSE'
+          ? 'O MyInstants não retornou um áudio válido.'
+          : error instanceof Error ? error.message : 'Não foi possível baixar e vincular o som do evento.',
+      }
+    }
+  })
+
+  ipcMain.handle('event-sound:play', (_, eventId: EventSoundId) => {
+    if (!EVENT_SOUND_IDS.includes(eventId)) return { success: false, error: 'Evento inválido.' }
+    const soundPath = readEventSoundMap()[eventId]
+    const fullPath = soundPath ? getEventSoundPath(soundPath) : null
+    if (!fullPath || !fs.existsSync(fullPath)) return { success: false, error: 'Esse evento ainda não tem áudio.' }
+    return { success: true, url: toAudioDataUrl(fullPath) }
+  })
+
+  ipcMain.handle('event-sound:remove', (_, eventId: EventSoundId) => {
+    if (!EVENT_SOUND_IDS.includes(eventId)) return { success: false, error: 'Evento inválido.' }
+    const eventSounds = readEventSoundMap()
+    const soundPath = eventSounds[eventId]
+    delete eventSounds[eventId]
+    writeEventSoundMap(eventSounds)
+    const fullPath = soundPath ? getEventSoundPath(soundPath) : null
+    if (fullPath && !Object.values(getSoundMap()).includes(soundPath!) && !Object.values(eventSounds).includes(soundPath!)) {
+      try { fs.unlinkSync(fullPath) } catch { /* cleanup failure does not undo the unlink */ }
+    }
+    return { success: true }
+  })
+
   ipcMain.handle('sound-library:list', async () => {
     const soundMap = getSoundMap()
     const metadata = readSoundLibraryMetadata()
@@ -314,6 +463,9 @@ export function registerSoundIpc() {
       contentHash: string
       grpIds: number[]
       cardNames: Set<string>
+      eventIds: Set<EventSoundId>
+      eventNames: Set<string>
+      displayNames: Set<string>
       soundPaths: Set<string>
       soundFiles: Set<string>
       favorite: boolean
@@ -330,6 +482,9 @@ export function registerSoundIpc() {
         contentHash,
         grpIds: [],
         cardNames: new Set<string>(),
+        eventIds: new Set<EventSoundId>(),
+        eventNames: new Set<string>(),
+        displayNames: new Set<string>(),
         soundPaths: new Set<string>(),
         soundFiles: new Set<string>(),
         favorite: false,
@@ -337,6 +492,38 @@ export function registerSoundIpc() {
       }
       group.grpIds.push(Number(grpId))
       group.cardNames.add(cardName)
+      if (typeof savedMetadata?.displayName === 'string' && savedMetadata.displayName.trim()) group.displayNames.add(savedMetadata.displayName.trim())
+      group.soundPaths.add(soundPath)
+      group.soundFiles.add(path.basename(soundPath))
+      group.favorite ||= savedMetadata?.favorite === true
+      for (const tag of Array.isArray(savedMetadata?.tags) ? savedMetadata.tags : []) {
+        if (typeof tag === 'string' && tag.trim()) group.tags.add(tag.trim())
+      }
+      groups.set(contentHash, group)
+    }
+
+    for (const [eventId, soundPath] of Object.entries(readEventSoundMap()) as Array<[EventSoundId, string]>) {
+      const fullPath = getEventSoundPath(soundPath)
+      if (!fullPath || !fs.existsSync(fullPath)) continue
+      const contentHash = await getSoundFileHash(fullPath)
+      const savedMetadata = metadata[soundPath]
+      const group = groups.get(contentHash) ?? {
+        contentHash,
+        grpIds: [],
+        cardNames: new Set<string>(),
+        eventIds: new Set<EventSoundId>(),
+        eventNames: new Set<string>(),
+        displayNames: new Set<string>(),
+        soundPaths: new Set<string>(),
+        soundFiles: new Set<string>(),
+        favorite: false,
+        tags: new Set<string>(),
+      }
+      group.eventIds.add(eventId)
+      group.eventNames.add(EVENT_SOUND_LABELS[eventId])
+      group.displayNames.add(typeof savedMetadata?.displayName === 'string' && savedMetadata.displayName.trim()
+        ? savedMetadata.displayName.trim()
+        : EVENT_SOUND_LABELS[eventId])
       group.soundPaths.add(soundPath)
       group.soundFiles.add(path.basename(soundPath))
       group.favorite ||= savedMetadata?.favorite === true
@@ -353,11 +540,13 @@ export function registerSoundIpc() {
           contentHash: group.contentHash,
           soundPath: soundPaths[0],
           soundPaths,
-          soundFile: path.basename(soundPaths[0]),
+          soundFile: [...group.displayNames].sort((a, b) => a.localeCompare(b))[0] || path.basename(soundPaths[0]),
           soundFiles: [...group.soundFiles].sort((a, b) => a.localeCompare(b)),
           duplicateCount: Math.max(0, soundPaths.length - 1),
           grpIds: [...new Set(group.grpIds)],
           cardNames: [...group.cardNames].sort((a, b) => a.localeCompare(b)),
+          eventIds: [...group.eventIds],
+          eventNames: [...group.eventNames].sort((a, b) => a.localeCompare(b)),
           favorite: group.favorite,
           tags: [...group.tags].slice(0, 8),
         }
@@ -375,7 +564,7 @@ export function registerSoundIpc() {
       const soundPaths = Array.isArray(data?.soundPaths)
         ? data.soundPaths
         : typeof data?.soundPath === 'string' ? [data.soundPath] : []
-      const soundMapValues = new Set(Object.values(getSoundMap()))
+      const soundMapValues = new Set([...Object.values(getSoundMap()), ...Object.values(readEventSoundMap())])
       if (!soundPaths.length || soundPaths.some((soundPath) =>
         typeof soundPath !== 'string' || !soundMapValues.has(soundPath) || !getManagedSoundFile(soundPath)
       )) {
@@ -430,7 +619,8 @@ export function registerSoundIpc() {
       }
 
       const soundMap = getSoundMap()
-      const mapValues = new Set(Object.values(soundMap))
+      const eventSoundMap = readEventSoundMap()
+      const mapValues = new Set([...Object.values(soundMap), ...Object.values(eventSoundMap)])
       const files = soundPaths.map((soundPath) => {
         const fullPath = getManagedSoundFile(soundPath)
         if (!fullPath || !fs.existsSync(fullPath) || !mapValues.has(soundPath)) {
@@ -451,6 +641,14 @@ export function registerSoundIpc() {
         }
       }
       saveSoundMap(soundMap)
+      for (const eventId of EVENT_SOUND_IDS) {
+        const soundPath = eventSoundMap[eventId]
+        if (soundPath && soundPaths.includes(soundPath) && soundPath !== keepSoundPath) {
+          eventSoundMap[eventId] = keepSoundPath
+          remappedCount += 1
+        }
+      }
+      writeEventSoundMap(eventSoundMap)
 
       const metadata = readSoundLibraryMetadata()
       const favorite = soundPaths.some((soundPath) => metadata[soundPath]?.favorite === true)
@@ -459,7 +657,8 @@ export function registerSoundIpc() {
           .filter((tag): tag is string => typeof tag === 'string' && Boolean(tag.trim()))
           .map((tag) => [tag.toLocaleLowerCase(), tag.trim().slice(0, 24)])
       ).values()].slice(0, 8)
-      metadata[keepSoundPath] = { favorite, tags }
+      const displayName = metadata[keepSoundPath]?.displayName || soundPaths.map((soundPath) => metadata[soundPath]?.displayName).find((name): name is string => Boolean(name))
+      metadata[keepSoundPath] = { favorite, tags, ...(displayName ? { displayName } : {}) }
       for (const soundPath of soundPaths) {
         if (soundPath !== keepSoundPath) delete metadata[soundPath]
       }
@@ -486,8 +685,9 @@ export function registerSoundIpc() {
     try {
       const soundPath = typeof data?.soundPath === 'string' ? data.soundPath : ''
       const soundMap = getSoundMap()
+      const eventSoundPaths = Object.values(readEventSoundMap())
       const fullPath = getManagedSoundFile(soundPath)
-      if (!fullPath || !fs.existsSync(fullPath) || !Object.values(soundMap).includes(soundPath)) {
+      if (!fullPath || !fs.existsSync(fullPath) || (!Object.values(soundMap).includes(soundPath) && !eventSoundPaths.includes(soundPath))) {
         throw new Error('Esse áudio não está mais disponível na biblioteca.')
       }
       if (!Array.isArray(data.grpIds) || !data.grpIds.length || data.grpIds.some((grpId) => !Number.isSafeInteger(grpId) || grpId <= 0)) {

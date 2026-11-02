@@ -22,13 +22,43 @@ const themeModeError = ref('')
 const appVolume = ref(100)
 const savingAppVolume = ref(false)
 const appVolumeError = ref('')
+const arenaShortcutEnabled = ref(false)
+const savingArenaShortcutEnabled = ref(false)
+const arenaShortcutError = ref('')
 const autoStartWithArena = ref({ available: false, enabled: false })
 const savingAutoStartWithArena = ref(false)
 const autoStartWithArenaError = ref('')
+type ApplicationUpdateStatus = {
+  state: 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'installing' | 'up-to-date' | 'error'
+  version?: string
+  percent?: number
+  error?: string
+}
+const applicationUpdate = ref<ApplicationUpdateStatus>({ state: 'idle' })
+const applicationUpdateDismissed = ref(false)
+const applicationUpdateActionError = ref('')
+const showApplicationUpdateNotice = computed(() =>
+  !applicationUpdateDismissed.value && ['available', 'downloading', 'downloaded', 'installing', 'error'].includes(applicationUpdate.value.state)
+)
+type EventSoundId = 'defeat' | 'victory' | 'damage-taken' | 'damage-dealt' | 'life-gained' | 'creature-died' | 'spell-countered'
+const eventSoundIds: EventSoundId[] = ['defeat', 'victory', 'damage-taken', 'damage-dealt', 'life-gained', 'creature-died', 'spell-countered']
+const eventSoundLabels: Record<EventSoundId, { title: string; description: string }> = {
+  defeat: { title: 'Derrota', description: 'Quando a partida terminar com uma derrota.' },
+  victory: { title: 'Vitória', description: 'Quando a partida terminar com uma vitória.' },
+  'damage-taken': { title: 'Sofrer dano', description: 'Quando você receber dano durante a partida.' },
+  'damage-dealt': { title: 'Causar dano', description: 'Quando você causar dano ao oponente.' },
+  'life-gained': { title: 'Ganhar vida', description: 'Quando seu total de vida aumentar.' },
+  'creature-died': { title: 'Criatura morreu', description: 'Quando uma criatura sair do campo e for para o cemitério.' },
+  'spell-countered': { title: 'Mágica anulada', description: 'Quando uma mágica sua na pilha for anulada.' },
+}
+const eventSounds = ref<Partial<Record<EventSoundId, string>>>({})
+const eventSoundBusy = ref<Partial<Record<EventSoundId, boolean>>>({})
+const eventSoundErrors = ref<Partial<Record<EventSoundId, string>>>({})
+const eventSoundInput = ref<HTMLInputElement | null>(null)
 
 const selectedCard = ref<any | null>(null)
-const currentView = ref<'cards' | 'sounds' | 'library' | 'deck' | 'settings'>('deck')
-const deckInput = ref('')
+const currentView = ref<'cards' | 'events' | 'sounds' | 'library' | 'deck' | 'settings'>('deck')
+const deckImportText = ref('')
 const deckCards = ref<any[]>([])
 const deckCardFilter = ref('')
 const filteredDeckCards = computed(() => {
@@ -67,6 +97,12 @@ const soundMappings = ref<Array<{
   imageLoading?: boolean
 }>>([])
 const soundFilter = ref('')
+const deckOverlayCards = computed(() => deckCards.value.flatMap((card) => {
+  const savedAudio = card.savedAudio?.[0]
+  const grpId = Number(savedAudio?.grpId ?? savedAudio?.grpIds?.[0] ?? card.grpIds?.[0])
+  if (!savedAudio || !Number.isInteger(grpId) || grpId <= 0) return []
+  return [{ cardName: card.cardName, quantity: card.quantity, grpId, isLand: card.isLand === true }]
+}))
 const filteredSoundMappings = computed(() => {
   const query = soundFilter.value.trim().toLocaleLowerCase()
   return query
@@ -85,6 +121,8 @@ const soundLibrary = ref<Array<{
   duplicateCount: number
   grpIds: number[]
   cardNames: string[]
+  eventIds: EventSoundId[]
+  eventNames: string[]
   favorite: boolean
   tags: string[]
 }>>([])
@@ -113,7 +151,7 @@ const filteredSoundLibrary = computed(() => {
   return soundLibrary.value.filter((sound) => {
     if (soundLibraryFavoritesOnly.value && !sound.favorite) return false
     if (!query) return true
-    return [sound.soundFile, ...sound.soundFiles, ...sound.cardNames, ...sound.tags]
+    return [sound.soundFile, ...sound.soundFiles, ...sound.cardNames, ...sound.eventNames, ...sound.tags]
       .some((value) => value.toLocaleLowerCase().includes(query))
   })
 })
@@ -138,14 +176,23 @@ const selectedCardSaved = ref(false)
 const selectedCardSaveError = ref('')
 let searchTimer: ReturnType<typeof setTimeout> | undefined
 let appVolumeSaveTimer: ReturnType<typeof setTimeout> | undefined
+let myInstantsDurationRequest = 0
 let searchRequest = 0
 
 onMounted(async () => {
+  window.electronAPI.onPlaySound(playAudio)
+  window.electronAPI.onAppUpdateStatus((status) => {
+    applicationUpdate.value = status
+    if (['available', 'downloaded', 'error'].includes(status.state)) applicationUpdateDismissed.value = false
+  })
+  applicationUpdate.value = await window.electronAPI.getAppUpdateStatus().catch(() => ({ state: 'idle' as const }))
   audioTriggerModes.value = await window.electronAPI.listAudioTriggerModes().catch(() => ({}))
   audioPlayerScope.value = await window.electronAPI.getAudioPlayerScope().catch(() => 'all')
   themeMode.value = await window.electronAPI.getAppThemeMode().catch(() => 'dark')
   appVolume.value = await window.electronAPI.getAppVolume().catch(() => 100)
+  arenaShortcutEnabled.value = await window.electronAPI.getArenaShortcutEnabled().catch(() => false)
   autoStartWithArena.value = await window.electronAPI.getAutoStartWithArena().catch(() => ({ available: false, enabled: false }))
+  void loadEventSounds()
   const databaseStatus = await window.electronAPI.getDatabaseStatus()
   databaseNotice.value = databaseStatus.warning || (
     databaseStatus.available
@@ -156,7 +203,12 @@ onMounted(async () => {
   const status = await window.electronAPI.getLogFileStatus()
   logFileSelected.value = status.selected
 
-  window.electronAPI.onPlaySound(playAudio)
+  window.electronAPI.onAppVolumeUpdate((volume) => {
+    const normalizedVolume = Math.max(0, Math.min(100, Math.round(volume)))
+    appVolume.value = normalizedVolume
+    for (const audio of activeAudio) audio.volume = normalizedVolume / 100
+    if (myInstantsPreview.value) myInstantsPreview.value.volume = normalizedVolume / 100
+  })
   window.electronAPI.onSavedDecksUpdated(() => {
     if (currentView.value === 'deck' && !selectedArenaDeck.value) {
       void loadSavedArenaDecks()
@@ -179,6 +231,26 @@ function isSavingCardAudioTriggerMode(cardName: string) {
 
 function getCardAudioTriggerError(cardName: string) {
   return cardTriggerErrors.value[cardTriggerKey(cardName)] ?? ''
+}
+
+async function downloadApplicationUpdate() {
+  if (applicationUpdate.value.state !== 'available') return
+  applicationUpdateActionError.value = ''
+  const result = await window.electronAPI.downloadAppUpdate()
+  if (!result.success) applicationUpdateActionError.value = result.error || 'Não foi possível baixar a atualização.'
+}
+
+async function installApplicationUpdate() {
+  if (applicationUpdate.value.state !== 'downloaded') return
+  applicationUpdateActionError.value = ''
+  const result = await window.electronAPI.installAppUpdate()
+  if (!result.success) applicationUpdateActionError.value = result.error || 'Não foi possível instalar a atualização.'
+}
+
+async function retryApplicationUpdateCheck() {
+  applicationUpdateActionError.value = ''
+  const result = await window.electronAPI.checkForAppUpdate()
+  if (!result.success) applicationUpdateActionError.value = result.error || 'Não foi possível verificar atualizações.'
 }
 
 async function setCardAudioTriggerMode(cardName: string, mode: 'cast' | 'resolution') {
@@ -260,6 +332,27 @@ function setAppVolume(volume: number) {
   }, 300)
 }
 
+async function toggleArenaShortcut() {
+  if (savingArenaShortcutEnabled.value) return
+  const previousEnabled = arenaShortcutEnabled.value
+  const nextEnabled = !previousEnabled
+  arenaShortcutEnabled.value = nextEnabled
+  savingArenaShortcutEnabled.value = true
+  arenaShortcutError.value = ''
+  try {
+    const result = await window.electronAPI.setArenaShortcutEnabled(nextEnabled)
+    if (!result.success) {
+      arenaShortcutEnabled.value = previousEnabled
+      arenaShortcutError.value = result.error || 'Não foi possível salvar essa opção.'
+    }
+  } catch {
+    arenaShortcutEnabled.value = previousEnabled
+    arenaShortcutError.value = 'Não foi possível salvar essa opção.'
+  } finally {
+    savingArenaShortcutEnabled.value = false
+  }
+}
+
 async function toggleAutoStartWithArena() {
   if (!autoStartWithArena.value.available || savingAutoStartWithArena.value) return
   savingAutoStartWithArena.value = true
@@ -311,6 +404,59 @@ async function openSoundManager() {
       'Não foi possível carregar os sons. Reinicie o aplicativo e tente novamente.'
   } finally {
     loadingSounds.value = false
+  }
+}
+
+async function loadEventSounds() {
+  try {
+    const saved = await window.electronAPI.listEventSounds()
+    eventSounds.value = Object.fromEntries(saved.map(({ eventId, soundFile }) => [eventId, soundFile]))
+  } catch (error) {
+    console.error('Não foi possível carregar os sons de eventos:', error)
+  }
+}
+
+async function saveEventSound(eventId: EventSoundId | undefined, event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file || !eventId) return
+  const filePath = window.electronAPI.getFilePath(file)
+  input.value = ''
+  if (!filePath) {
+    eventSoundErrors.value[eventId] = 'Não foi possível acessar esse arquivo.'
+    return
+  }
+
+  eventSoundBusy.value[eventId] = true
+  eventSoundErrors.value[eventId] = ''
+  try {
+    const result = await window.electronAPI.saveEventSound({ eventId, filePath })
+    if (!result.success || !result.soundFile) throw new Error(result.error || 'Não foi possível salvar o áudio.')
+    eventSounds.value[eventId] = result.displayName || result.soundFile
+  } catch (error) {
+    eventSoundErrors.value[eventId] = error instanceof Error ? error.message : 'Não foi possível salvar o áudio.'
+  } finally {
+    eventSoundBusy.value[eventId] = false
+  }
+}
+
+async function playEventSound(eventId: EventSoundId) {
+  const result = await window.electronAPI.playEventSound(eventId)
+  if (result.success && result.url) playAudio(result.url)
+  else eventSoundErrors.value[eventId] = result.error || 'Não foi possível reproduzir o áudio.'
+}
+
+async function removeEventSound(eventId: EventSoundId) {
+  eventSoundBusy.value[eventId] = true
+  eventSoundErrors.value[eventId] = ''
+  try {
+    const result = await window.electronAPI.removeEventSound(eventId)
+    if (!result.success) throw new Error(result.error || 'Não foi possível excluir o áudio.')
+    delete eventSounds.value[eventId]
+  } catch (error) {
+    eventSoundErrors.value[eventId] = error instanceof Error ? error.message : 'Não foi possível excluir o áudio.'
+  } finally {
+    eventSoundBusy.value[eventId] = false
   }
 }
 
@@ -367,6 +513,15 @@ async function saveLibraryTags(sound: any, event: Event) {
   } finally {
     savingLibrarySound.value = ''
   }
+}
+
+async function playLibrarySound(sound: any) {
+  if (sound.eventIds?.length) {
+    await playEventSound(sound.eventIds[0])
+    return
+  }
+  const grpId = Number(sound.grpIds?.[0])
+  if (Number.isInteger(grpId) && grpId > 0) await playSound(grpId)
 }
 
 function openLibraryAssignment(sound: any) {
@@ -541,6 +696,7 @@ async function replaceSound(event: Event) {
           grpIds: [...sound.grpIds],
         }]
         sound.card.saveError = ''
+        await syncDeckToArenaOverlay()
       } else if (sound.kind === 'selected-card') {
         selectedCardSaved.value = true
         selectedCardSaveError.value = ''
@@ -581,6 +737,7 @@ function playAudio(url: string) {
   audio.play().catch((error) => {
     releaseAudio()
     console.error('Não foi possível reproduzir o áudio:', error)
+    window.electronAPI.reportAudioPlaybackError(error instanceof Error ? error.message : String(error))
   })
 }
 
@@ -590,6 +747,15 @@ async function playSound(grpId: number) {
   if (result.success && result.url) {
     playAudio(result.url)
   }
+}
+
+async function syncDeckToArenaOverlay() {
+  if (!deckWasImported.value) return
+  const result = await window.electronAPI.setArenaDeckOverlayData({
+    deckName: deckTitle.value || selectedArenaDeck.value?.name || 'Deck',
+    cards: deckOverlayCards.value,
+  })
+  if (!result.success) console.error(result.error || 'Não foi possível atualizar a lista de áudios do deck.')
 }
 
 function parseArenaDeck(text: string) {
@@ -696,7 +862,7 @@ async function importSavedArenaDeck(deck: any) {
     `${entry.quantity} ${entry.name} (${entry.setCode}) ${entry.collectorNumber}`
   )
 
-  deckInput.value = ['Deck', ...mainLines, 'Sideboard', ...sideboardLines].join('\n')
+  deckImportText.value = ['Deck', ...mainLines, 'Sideboard', ...sideboardLines].join('\n')
   deckTitle.value = deck.name
   await importDeck()
 
@@ -710,30 +876,13 @@ async function importSavedArenaDeck(deck: any) {
   }
 }
 
-async function pasteDeckFromClipboard() {
-  deckImportError.value = ''
-
-  try {
-    const clipboardText = await window.electronAPI.readClipboardText()
-    if (!clipboardText.trim()) {
-      deckImportError.value = 'A área de transferência está vazia. Copie a lista do Arena e tente novamente.'
-      return
-    }
-
-    deckInput.value = clipboardText
-  } catch (error) {
-    console.error(error)
-    deckImportError.value = 'Não foi possível ler a área de transferência. Cole a lista no campo abaixo.'
-  }
-}
-
 async function importDeck() {
   deckImportError.value = ''
   unresolvedDeckCards.value = []
   deckCards.value = []
   deckWasImported.value = false
 
-  const { entries, invalidLines } = parseArenaDeck(deckInput.value)
+  const { entries, invalidLines } = parseArenaDeck(deckImportText.value)
   if (!entries.length) {
     deckImportError.value = 'Não encontrei cartas no formato do Arena. Use a lista em inglês com quantidade, edição e número da carta.'
     return
@@ -811,18 +960,13 @@ async function importDeck() {
       }
       card.savedAudio = [...audioByFile.values()]
     }
+    await syncDeckToArenaOverlay()
   } catch (error) {
     console.error(error)
     deckImportError.value = 'Não foi possível montar o deck. Verifique se a base de cartas está disponível.'
   } finally {
     deckImporting.value = false
   }
-}
-
-async function importManualDeck() {
-  selectedArenaDeck.value = { id: 'clipboard', name: 'Lista copiada' }
-  deckTitle.value = 'Lista copiada'
-  await importDeck()
 }
 
 function resetDeckImport() {
@@ -848,9 +992,9 @@ async function showCardPreview(card: any) {
   const preview = cardPreview.value
 
   try {
-    let versions = Array.isArray(card.versions) ? card.versions : []
+    let versions: any[] = Array.isArray(card.versions) ? card.versions : []
     if (!versions.length) versions = await getCardVersions(name)
-    const uniqueVersions = [...new Map(versions.map((version: any) => [version.grp_id, version])).values()]
+    const uniqueVersions = [...new Map<number, any>(versions.map((version: any): [number, any] => [Number(version.grp_id), version])).values()]
     preview.images = await getCardVersionImages(uniqueVersions)
 
     if (!preview.images.length) {
@@ -906,73 +1050,12 @@ async function removeDeckSound(card: any, audio: any) {
     }
 
     card.savedAudio = card.savedAudio.filter((item: any) => item.soundFile !== audio.soundFile)
+    await syncDeckToArenaOverlay()
   } catch (error) {
     console.error(error)
     card.saveError = error instanceof Error ? error.message : 'Não foi possível excluir o som.'
   } finally {
     card.deletingAudio = false
-  }
-}
-
-async function openMyInstants(card?: any) {
-  if (card) card.downloadError = ''
-  try {
-    await window.electronAPI.openMyInstants()
-  } catch (error) {
-    console.error(error)
-    const message = 'Não foi possível abrir o MyInstants no navegador.'
-    if (card) card.downloadError = message
-    else deckImportError.value = message
-  }
-}
-
-async function loadRecentAudioDownloads(card: any) {
-  card.downloadsLoading = true
-  card.downloadError = ''
-  try {
-    card.recentAudioDownloads = await window.electronAPI.listRecentAudioDownloads()
-    if (!card.recentAudioDownloads.length) {
-      card.downloadError = 'Não encontrei MP3s recentes na pasta Downloads.'
-    }
-  } catch (error) {
-    console.error(error)
-    card.downloadError = 'Não foi possível ler os downloads recentes.'
-  } finally {
-    card.downloadsLoading = false
-  }
-}
-
-async function importDownloadedSound(card: any, download: { name: string; filePath: string }) {
-  card.saving = true
-  card.saved = false
-  card.saveError = ''
-  card.downloadError = ''
-
-  try {
-    const result = await window.electronAPI.importDownloadedSound({
-      cardName: card.cardName,
-      grpIds: card.grpIds,
-      filePath: download.filePath,
-    })
-
-    if (!result.success) {
-      card.downloadError = result.error || 'Não foi possível associar o áudio baixado.'
-      return
-    }
-
-    card.audioFile = null
-    card.saved = true
-    card.savedAudio = [{
-      soundFile: result.soundFile || download.name,
-      grpId: card.grpIds[0],
-      grpIds: [...card.grpIds],
-    }]
-    card.recentAudioDownloads = []
-  } catch (error) {
-    console.error(error)
-    card.downloadError = error instanceof Error ? error.message : 'Não foi possível associar o áudio baixado.'
-  } finally {
-    card.saving = false
   }
 }
 
@@ -1092,7 +1175,7 @@ function navigateCardVersion(direction: -1 | 1) {
   card.image = versions[nextIndex].image
 }
 
-function openSoundSourceModal(target: { cardName: string; grpIds: number[]; card?: any; kind?: string }) {
+function openSoundSourceModal(target: { cardName: string; grpIds: number[]; card?: any; kind?: string; eventId?: EventSoundId }) {
   stopMyInstantsPreview()
   myInstantsTarget.value = target
   replacementTarget.value = target
@@ -1126,7 +1209,8 @@ function chooseLocalSoundSource() {
   replacementTarget.value = myInstantsTarget.value
   stopMyInstantsPreview()
   myInstantsOpen.value = false
-  replacementInput.value?.click()
+  if (myInstantsTarget.value?.kind === 'event') eventSoundInput.value?.click()
+  else replacementInput.value?.click()
 }
 
 function stopMyInstantsPreview() {
@@ -1170,7 +1254,13 @@ async function searchMyInstants(page = 1) {
       myInstantsError.value = result.error || 'Não foi possível buscar sons.'
       return
     }
-    myInstantsResults.value = result.results || []
+    const durationRequest = ++myInstantsDurationRequest
+    myInstantsResults.value = (result.results || []).map((sound: any) => {
+      const apiDuration = Number(sound.duration)
+      const hasDuration = Number.isFinite(apiDuration) && apiDuration > 0
+      return { ...sound, durationSeconds: hasDuration ? apiDuration : null, durationLoading: !hasDuration }
+    })
+    void loadMyInstantsResultDurations(myInstantsResults.value, durationRequest)
     myInstantsCount.value = result.count || 0
     myInstantsPage.value = page
     myInstantsHasNext.value = Boolean(result.next)
@@ -1183,25 +1273,74 @@ async function searchMyInstants(page = 1) {
   }
 }
 
+function readAudioDuration(soundUrl: string) {
+  return new Promise<number | null>((resolve) => {
+    const audio = new Audio()
+    audio.preload = 'metadata'
+    let settled = false
+    const timeout = window.setTimeout(() => finish(null), 10_000)
+    const finish = (duration: number | null) => {
+      if (settled) return
+      settled = true
+      window.clearTimeout(timeout)
+      audio.pause()
+      audio.removeAttribute('src')
+      audio.load()
+      resolve(duration !== null && Number.isFinite(duration) && duration > 0 ? duration : null)
+    }
+    audio.addEventListener('loadedmetadata', () => finish(audio.duration), { once: true })
+    audio.addEventListener('error', () => finish(null), { once: true })
+    audio.src = soundUrl
+    audio.load()
+  })
+}
+
+async function loadMyInstantsResultDurations(sounds: any[], requestId: number) {
+  let nextIndex = 0
+  const worker = async () => {
+    while (nextIndex < sounds.length && requestId === myInstantsDurationRequest) {
+      const sound = sounds[nextIndex++]
+      if (!sound.durationLoading) continue
+      sound.durationSeconds = await readAudioDuration(sound.sound)
+      sound.durationLoading = false
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(4, sounds.length) }, () => worker()))
+}
+
+function formatAudioDuration(seconds: number) {
+  const wholeSeconds = Math.floor(seconds)
+  const minutes = Math.floor(wholeSeconds / 60)
+  return `${minutes}:${String(wholeSeconds % 60).padStart(2, '0')}`
+}
+
 async function assignMyInstantsSound(sound: any) {
   const target = myInstantsTarget.value
   if (!target || myInstantsAssigning.value) return
+  const eventId = target.kind === 'event' && typeof target.eventId === 'string'
+    ? eventSoundIds.find((id) => id === target.eventId)
+    : undefined
 
   myInstantsAssigning.value = sound.slug
   if (target.kind === 'deck' && target.card) target.card.saving = true
+  if (eventId) eventSoundBusy.value[eventId] = true
   myInstantsError.value = ''
   try {
-    const result = await window.electronAPI.assignMyInstantsSound({
-      cardName: target.cardName,
-      grpIds: [...target.grpIds],
-      soundUrl: sound.sound,
-    })
+    const result = eventId
+      ? await window.electronAPI.assignMyInstantsEventSound({ eventId, soundUrl: sound.sound, displayName: sound.name })
+      : await window.electronAPI.assignMyInstantsSound({
+          cardName: target.cardName,
+          grpIds: [...target.grpIds],
+          soundUrl: sound.sound,
+        })
     if (!result.success) {
       myInstantsError.value = result.error || 'Não foi possível baixar e vincular o som.'
       return
     }
 
-    if (target.kind === 'deck' && target.card) {
+    if (eventId) {
+      eventSounds.value[eventId] = result.displayName || result.soundFile || sound.name
+    } else if (target.kind === 'deck' && target.card) {
       target.card.saved = true
       target.card.audioFile = null
       target.card.savedAudio = [{
@@ -1216,7 +1355,7 @@ async function assignMyInstantsSound(sound: any) {
       const existing = soundMappings.value.find((item) =>
         item.grpIds.some((grpId) => target.grpIds.includes(grpId))
       )
-      if (existing) existing.soundFile = result.soundFile
+      if (existing && result.soundFile) existing.soundFile = result.soundFile
     }
 
     closeMyInstantsSearch()
@@ -1227,6 +1366,7 @@ async function assignMyInstantsSound(sound: any) {
       : 'Não foi possível baixar e vincular o som.'
   } finally {
     if (target.kind === 'deck' && target.card) target.card.saving = false
+    if (eventId) eventSoundBusy.value[eventId] = false
     myInstantsAssigning.value = ''
   }
 }
@@ -1244,13 +1384,13 @@ async function assignMyInstantsSound(sound: any) {
       </div>
 
       <nav class="topNavigation" aria-label="Navegação principal">
-        <button type="button" aria-label="Buscar cartas" title="Buscar cartas" :class="{ active: currentView === 'cards' }" @click="currentView = 'cards'">
+        <button type="button" aria-label="Buscar cartas" title="Buscar cartas" :class="{ active: currentView === 'cards' || currentView === 'sounds' }" @click="currentView = 'cards'">
           <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></svg>
           <span>Buscar cartas</span>
         </button>
-        <button type="button" aria-label="Gerenciar sons" title="Gerenciar sons" :class="{ active: currentView === 'sounds' }" @click="openSoundManager">
-          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 5h12M4 10h12M4 15h8"/><circle cx="16" cy="15" r="2"/></svg>
-          <span>Gerenciar sons</span>
+        <button type="button" aria-label="Sons de Eventos" title="Sons de Eventos" :class="{ active: currentView === 'events' }" @click="currentView = 'events'">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 12.5V7.8a2 2 0 0 1 2-2h1.2l5.3-3v14.4l-5.3-3H6a2 2 0 0 1-2-2Z"/><path d="M15 7a4 4 0 0 1 0 6M16.8 4.5a7.5 7.5 0 0 1 0 11"/></svg>
+          <span>Sons de Eventos</span>
         </button>
         <button type="button" aria-label="Biblioteca de sons" title="Biblioteca de sons" :class="{ active: currentView === 'library' }" @click="openSoundLibrary">
           <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8 15V4l9-2v11"/><circle cx="5" cy="15" r="3"/><circle cx="14" cy="13" r="3"/></svg>
@@ -1285,6 +1425,37 @@ async function assignMyInstantsSound(sound: any) {
         </span>
       </div>
     </header>
+
+    <section
+      v-if="showApplicationUpdateNotice"
+      class="applicationUpdateNotice"
+      :class="`applicationUpdate-${applicationUpdate.state}`"
+      role="status"
+      aria-live="polite"
+    >
+      <div class="applicationUpdateCopy">
+        <span class="applicationUpdateEyebrow">{{ applicationUpdate.state === 'error' ? 'ATUALIZAÇÃO' : 'NOVA VERSÃO' }}</span>
+        <strong v-if="applicationUpdate.state === 'available'">A versão {{ applicationUpdate.version }} está disponível</strong>
+        <strong v-else-if="applicationUpdate.state === 'downloading'">Baixando a versão {{ applicationUpdate.version }} · {{ applicationUpdate.percent ?? 0 }}%</strong>
+        <strong v-else-if="applicationUpdate.state === 'downloaded'">A versão {{ applicationUpdate.version }} está pronta para instalar</strong>
+        <strong v-else-if="applicationUpdate.state === 'installing'">Instalando e reabrindo o MTGA Sound Mod…</strong>
+        <strong v-else>Não foi possível verificar atualizações</strong>
+        <span v-if="applicationUpdate.state === 'available'">Baixe em segundo plano; a instalação e o reinício só acontecem quando você confirmar.</span>
+        <span v-else-if="applicationUpdate.state === 'downloaded'">O app vai fechar brevemente e reabrir já atualizado.</span>
+        <span v-else-if="applicationUpdate.state === 'downloading'">O download está acontecendo em segundo plano.</span>
+        <span v-else-if="applicationUpdate.state === 'error'">{{ applicationUpdateActionError || applicationUpdate.error || 'Tente verificar novamente.' }}</span>
+        <span v-if="applicationUpdateActionError && applicationUpdate.state !== 'error'" class="applicationUpdateActionError">{{ applicationUpdateActionError }}</span>
+      </div>
+      <div v-if="applicationUpdate.state === 'downloading'" class="applicationUpdateProgress" :aria-label="`Download ${applicationUpdate.percent ?? 0}%`">
+        <i :style="{ width: `${Math.max(0, Math.min(100, applicationUpdate.percent ?? 0))}%` }"></i>
+      </div>
+      <div class="applicationUpdateActions">
+        <button v-if="applicationUpdate.state === 'available'" type="button" class="applicationUpdatePrimary" @click="downloadApplicationUpdate">Baixar versão</button>
+        <button v-if="applicationUpdate.state === 'downloaded'" type="button" class="applicationUpdatePrimary" @click="installApplicationUpdate">Instalar e reiniciar</button>
+        <button v-if="applicationUpdate.state === 'error'" type="button" class="applicationUpdatePrimary" @click="retryApplicationUpdateCheck">Tentar novamente</button>
+        <button v-if="['available', 'downloaded', 'error'].includes(applicationUpdate.state)" type="button" class="applicationUpdateSecondary" @click="applicationUpdateDismissed = true">Depois</button>
+      </div>
+    </section>
 
     <div
       v-if="databaseNotice"
@@ -1322,7 +1493,18 @@ async function assignMyInstantsSound(sound: any) {
         class="hiddenFileInput"
         @change="replaceSound"
       />
+      <input
+        ref="eventSoundInput"
+        type="file"
+        accept=".mp3,.wav,.ogg,audio/mpeg,audio/wav,audio/ogg"
+        class="hiddenFileInput"
+        @change="saveEventSound(myInstantsTarget?.eventId, $event)"
+      />
       <div v-if="currentView === 'cards'" class="cardSearchPage">
+        <div class="cardWorkspaceTabs" role="tablist" aria-label="Cartas">
+          <button type="button" role="tab" aria-selected="true" class="selected" @click="currentView = 'cards'">Buscar</button>
+          <button type="button" role="tab" aria-selected="false" @click="openSoundManager">Gerenciar</button>
+        </div>
         <div class="pageHeader">
           <div>
             <span class="eyebrow">EDITOR DE EFEITOS SONOROS</span>
@@ -1426,6 +1608,49 @@ async function assignMyInstantsSound(sound: any) {
         </div>
       </div>
 
+      <section v-else-if="currentView === 'events'" class="eventSoundsPage" aria-labelledby="event-sounds-title">
+        <div class="managerHeader eventSoundsHeader">
+          <div>
+            <span class="eyebrow">EFEITOS DA PARTIDA</span>
+            <h1 id="event-sounds-title">Sons de Eventos</h1>
+            <p>Adicione seus próprios áudios para os principais momentos da partida.</p>
+          </div>
+        </div>
+
+        <div class="eventSoundsGrid">
+          <article v-for="eventId in eventSoundIds" :key="eventId" class="eventSoundCard">
+            <div class="eventSoundIcon" :class="`event-${eventId}`" aria-hidden="true">
+              <svg v-if="eventId === 'victory'" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/><path d="M12 2v3M4.9 4.9 7 7M2 12h3m14 0h3m-3.9-7.1L17 7"/></svg>
+              <svg v-else-if="eventId === 'defeat'" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/><circle cx="12" cy="12" r="9"/></svg>
+              <svg v-else-if="eventId === 'life-gained'" viewBox="0 0 24 24"><path d="M20.8 8.7c0 5.2-8.8 11-8.8 11s-8.8-5.8-8.8-11a4.7 4.7 0 0 1 8.8-2.3 4.7 4.7 0 0 1 8.8 2.3Z"/><path d="M12 8v6m-3-3h6"/></svg>
+              <svg v-else-if="eventId === 'creature-died'" viewBox="0 0 24 24"><path d="M4 21V9a8 8 0 0 1 16 0v12M2 21h20"/><path d="M9 10h.01M15 10h.01M9 15h6"/></svg>
+              <svg v-else-if="eventId === 'spell-countered'" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 8 8 8m0-8-8 8"/></svg>
+              <svg v-else viewBox="0 0 24 24"><path d="M12 3v18M5 7l7-4 7 4M5 17l7 4 7-4"/><path d="m8 12 4-3 4 3-4 3-4-3Z"/></svg>
+            </div>
+            <div class="eventSoundInfo">
+              <h2>{{ eventSoundLabels[eventId].title }}</h2>
+              <p>{{ eventSoundLabels[eventId].description }}</p>
+              <span class="eventSoundFile" :class="{ assigned: eventSounds[eventId] }">
+                {{ eventSoundBusy[eventId] ? 'Salvando áudio…' : eventSounds[eventId] || 'Nenhum áudio definido' }}
+              </span>
+            </div>
+            <div class="eventSoundActions">
+              <button type="button" class="eventSoundUpload" :class="{ disabled: eventSoundBusy[eventId] }" :aria-label="eventSounds[eventId] ? 'Trocar áudio' : 'Enviar áudio'" :title="eventSounds[eventId] ? 'Trocar áudio' : 'Enviar áudio'" :disabled="eventSoundBusy[eventId]" @click="openSoundSourceModal({ cardName: eventSoundLabels[eventId].title, grpIds: [], kind: 'event', eventId })">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 13V3m0 0L6.5 6.5M10 3l3.5 3.5M4 11v5h12v-5"/></svg>
+              </button>
+              <button v-if="eventSounds[eventId]" type="button" class="iconActionButton playActionButton" data-tooltip="Ouvir áudio" :aria-label="`Ouvir som de ${eventSoundLabels[eventId].title}`" :disabled="eventSoundBusy[eventId]" @click="playEventSound(eventId)">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7 4 9 6-9 6V4Z"/></svg>
+              </button>
+              <button v-if="eventSounds[eventId]" type="button" class="iconActionButton deleteActionButton" data-tooltip="Excluir áudio" :aria-label="`Excluir som de ${eventSoundLabels[eventId].title}`" :disabled="eventSoundBusy[eventId]" @click="removeEventSound(eventId)">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6h12M8 6V4h4v2m2 0-.7 10H6.7L6 6m2 3v4m4-4v4"/></svg>
+              </button>
+            </div>
+            <p v-if="eventSoundErrors[eventId]" class="eventSoundError" role="alert">{{ eventSoundErrors[eventId] }}</p>
+          </article>
+        </div>
+        <p class="eventSoundsHint">Formatos aceitos: MP3, WAV e OGG.</p>
+      </section>
+
       <div v-else-if="currentView === 'deck'" class="deckBuilder">
         <div class="managerHeader deckHeader">
           <div>
@@ -1482,22 +1707,6 @@ async function assignMyInstantsSound(sound: any) {
             Nenhum deck encontrado neste formato.
           </div>
 
-          <details class="manualDeckImport">
-            <summary>Importar lista copiada manualmente</summary>
-            <textarea
-              v-model="deckInput"
-              class="deckInput"
-              placeholder="Deck&#10;3 Ajani Resolute (FRA) 195&#10;4 Plains (UNF) 240"
-              aria-label="Lista de cartas copiada do MTG Arena"
-            ></textarea>
-            <div class="deckImportActions">
-              <button class="secondaryButton" @click="pasteDeckFromClipboard">Ler área de transferência</button>
-              <button :disabled="deckImporting" @click="importManualDeck">
-                {{ deckImporting ? 'Montando deck…' : 'Montar página do deck' }}
-              </button>
-            </div>
-            <p v-if="deckImportError" class="deckImportError" role="alert">{{ deckImportError }}</p>
-          </details>
         </div>
 
         <div v-else-if="!deckWasImported" class="managerEmpty">Montando página do deck…</div>
@@ -1506,7 +1715,7 @@ async function assignMyInstantsSound(sound: any) {
           <div class="deckSummary">
             <strong>{{ deckTitle || `${deckCards.length} cartas encontradas` }}</strong>
             <span>{{ deckCards.length }} cartas reconhecidas</span>
-            <span>Selecione um áudio em cada carta e salve o efeito.</span>
+            <span>O mini painel acompanha o Arena automaticamente quando o jogo está aberto.</span>
           </div>
 
           <div v-if="deckImportError" class="deckImportWarning" role="status">{{ deckImportError }}</div>
@@ -1577,6 +1786,10 @@ async function assignMyInstantsSound(sound: any) {
         v-else-if="currentView === 'sounds'"
         class="soundManager"
       >
+        <div class="cardWorkspaceTabs" role="tablist" aria-label="Cartas">
+          <button type="button" role="tab" aria-selected="false" @click="currentView = 'cards'">Buscar</button>
+          <button type="button" role="tab" aria-selected="true" class="selected" @click="openSoundManager">Gerenciar</button>
+        </div>
         <div class="managerHeader">
           <div>
             <h1>Gerenciar sons</h1>
@@ -1695,13 +1908,17 @@ async function assignMyInstantsSound(sound: any) {
         <div v-else-if="!soundLibrary.length" class="managerEmpty libraryEmpty">
           <div class="emptyIcon">♫</div>
           <h2>Sua biblioteca está vazia</h2>
-          <p>Quando você vincular sons às cartas, eles aparecerão aqui para você organizar e reutilizar.</p>
+          <p>Quando você adicionar sons às cartas ou aos eventos, eles aparecerão aqui para você organizar e reutilizar.</p>
         </div>
         <div v-else-if="filteredSoundLibrary.length" class="soundList librarySoundList">
           <article v-for="sound in filteredSoundLibrary" :key="sound.soundPath" class="soundRow librarySoundRow">
             <div class="librarySoundInfo">
               <strong :title="sound.soundFile">{{ sound.soundFile }}</strong>
-              <small :title="sound.cardNames.join(', ')">Usado em {{ sound.cardNames.length }} {{ sound.cardNames.length === 1 ? 'carta' : 'cartas' }} · {{ sound.cardNames.join(', ') }}</small>
+              <small :title="[...sound.cardNames, ...sound.eventNames.map((name) => `Evento: ${name}`)].join(', ')">
+                <template v-if="sound.cardNames.length">{{ sound.cardNames.length }} {{ sound.cardNames.length === 1 ? 'carta' : 'cartas' }}: {{ sound.cardNames.join(', ') }}</template>
+                <template v-if="sound.cardNames.length && sound.eventNames.length"> · </template>
+                <template v-if="sound.eventNames.length">{{ sound.eventNames.length === 1 ? 'Evento' : 'Eventos' }}: {{ sound.eventNames.join(', ') }}</template>
+              </small>
               <small v-if="sound.duplicateCount" class="libraryDuplicateHint" :title="sound.soundFiles.join(', ')">{{ sound.duplicateCount + 1 }} arquivos com conteúdo idêntico</small>
             </div>
             <button
@@ -1726,7 +1943,7 @@ async function assignMyInstantsSound(sound: any) {
               >
             </label>
             <div class="librarySoundActions">
-              <button type="button" class="iconActionButton playActionButton" :aria-label="`Ouvir ${sound.soundFile}`" title="Ouvir áudio" @click="playSound(sound.grpIds[0])">
+              <button type="button" class="iconActionButton playActionButton" :aria-label="`Ouvir ${sound.soundFile}`" title="Ouvir áudio" @click="playLibrarySound(sound)">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 10 6-10 6z"/></svg>
               </button>
               <button v-if="sound.duplicateCount" type="button" class="libraryMergeButton" @click="openLibraryMerge(sound)">Unificar {{ sound.duplicateCount }} duplicata(s)</button>
@@ -1755,7 +1972,7 @@ async function assignMyInstantsSound(sound: any) {
               <h2 id="theme-mode-title">Aparência</h2>
               <p>Escolha o tema do aplicativo.</p>
             </div>
-            <span class="themePreferenceStatus">{{ savingThemeMode ? 'Salvando…' : 'Salvo automaticamente' }}</span>
+            <span class="themePreferenceStatus">Salvo automaticamente</span>
           </div>
           <div class="themeModeOptions" role="group" aria-label="Tema do aplicativo">
             <button type="button" class="themeModeOption" :class="{ selected: themeMode === 'dark' }" :aria-pressed="themeMode === 'dark'" :disabled="savingThemeMode" @click="setThemeMode('dark')">
@@ -1793,8 +2010,24 @@ async function assignMyInstantsSound(sound: any) {
             @input="setAppVolume(Number(($event.target as HTMLInputElement).value))"
           >
           <div class="volumeRangeLabels" aria-hidden="true"><span>Mudo</span><span>Máximo</span></div>
-          <p v-if="savingAppVolume" class="autoStartStatus">Salvando preferência…</p>
           <p v-if="appVolumeError" class="audioPlayerScopeError" role="alert">{{ appVolumeError }}</p>
+        </section>
+
+        <section class="playerScopeSettings settingsScopeCard" aria-labelledby="arena-shortcut-title">
+          <h2 id="arena-shortcut-title">Atalho no Arena</h2>
+          <button
+            type="button"
+            class="playerScopeOption autoStartOption"
+            :class="{ selected: arenaShortcutEnabled }"
+            role="switch"
+            :aria-checked="arenaShortcutEnabled"
+            :disabled="savingArenaShortcutEnabled"
+            @click="toggleArenaShortcut"
+          >
+            <span class="autoStartSwitch" :class="{ enabled: arenaShortcutEnabled }"><i></i></span>
+            <span><strong>Exibir atalho no Arena</strong><small>Mostra o botão flutuante somente durante partidas ativas. Desativado por padrão.</small></span>
+          </button>
+          <p v-if="arenaShortcutError" class="audioPlayerScopeError" role="alert">{{ arenaShortcutError }}</p>
         </section>
 
         <section class="playerScopeSettings settingsScopeCard" aria-labelledby="player-scope-title">
@@ -1841,7 +2074,6 @@ async function assignMyInstantsSound(sound: any) {
               <small>{{ autoStartWithArena.available ? 'O app fica em segundo plano e abre quando detectar que o Arena iniciou.' : 'Disponível na versão instalada para Windows.' }}</small>
             </span>
           </button>
-          <p v-if="savingAutoStartWithArena" class="autoStartStatus">Salvando preferência…</p>
           <p v-if="autoStartWithArenaError" class="audioPlayerScopeError" role="alert">{{ autoStartWithArenaError }}</p>
         </section>
       </div>
@@ -1969,9 +2201,9 @@ async function assignMyInstantsSound(sound: any) {
       <section class="myInstantsModal" role="dialog" aria-modal="true" aria-label="Buscar sons no MyInstants">
         <header class="myInstantsHeader">
           <div>
-            <span>{{ myInstantsModalStep === 'choices' ? 'ÁUDIO DA CARTA' : 'MYINSTANTS' }}</span>
+            <span>{{ myInstantsModalStep === 'choices' ? (myInstantsTarget?.kind === 'event' ? 'ÁUDIO DO EVENTO' : 'ÁUDIO DA CARTA') : 'MYINSTANTS' }}</span>
             <h2>{{ myInstantsModalStep === 'choices' ? 'Como deseja adicionar o som?' : `Buscar som para ${myInstantsTarget?.cardName}` }}</h2>
-            <p>{{ myInstantsModalStep === 'choices' ? myInstantsTarget?.cardName : 'Ouça uma prévia. Ao escolher, o MP3 será baixado e associado à carta.' }}</p>
+            <p>{{ myInstantsModalStep === 'choices' ? myInstantsTarget?.cardName : `Ouça uma prévia. Ao escolher, o MP3 será baixado e associado a ${myInstantsTarget?.kind === 'event' ? 'este evento' : 'esta carta'}.` }}</p>
           </div>
           <div class="myInstantsHeaderActions">
             <button v-if="myInstantsModalStep === 'search'" class="myInstantsBackButton" aria-label="Voltar às opções de áudio" title="Voltar" @click="myInstantsModalStep = 'choices'">‹</button>
@@ -1981,7 +2213,7 @@ async function assignMyInstantsSound(sound: any) {
         <div v-if="myInstantsModalStep === 'choices'" class="soundSourceChoices">
           <button class="soundSourceOption" @click="chooseLocalSoundSource">
             <span class="soundSourceOptionIcon">♫</span>
-            <span><strong>Do computador</strong><small>Escolha um MP3, WAV ou OGG e salve na carta.</small></span>
+            <span><strong>Do computador</strong><small>Escolha um MP3, WAV ou OGG e salve {{ myInstantsTarget?.kind === 'event' ? 'no evento' : 'na carta' }}.</small></span>
             <span class="soundSourceOptionArrow">›</span>
           </button>
           <button class="soundSourceOption" @click="chooseMyInstantsSource">
@@ -2003,11 +2235,18 @@ async function assignMyInstantsSound(sound: any) {
           <p v-else-if="myInstantsNotice" class="myInstantsNotice">{{ myInstantsNotice }}</p>
           <div v-if="myInstantsLoading" class="myInstantsLoading"><span class="processingSpinner"></span> Consultando o MyInstants…</div>
           <div v-else-if="myInstantsResults.length" class="myInstantsResults">
+            <div class="myInstantsResultsHeader" aria-hidden="true">
+              <span>Som</span><span>Duração</span><span>Ações</span>
+            </div>
             <article v-for="sound in myInstantsResults" :key="sound.slug" class="myInstantsResult">
               <div class="myInstantsResultInfo">
                 <strong>{{ sound.name }}</strong>
                 <span v-if="sound.tags">{{ sound.tags }}</span>
                 <small v-if="sound.description">{{ sound.description }}</small>
+              </div>
+              <div class="myInstantsResultDuration" :title="sound.durationSeconds ? `Duração: ${formatAudioDuration(sound.durationSeconds)}` : 'Duração indisponível'">
+                <small>Duração</small>
+                <strong>{{ sound.durationLoading ? '…' : sound.durationSeconds ? formatAudioDuration(sound.durationSeconds) : '—' }}</strong>
               </div>
               <div class="myInstantsResultActions">
                 <button class="myInstantsPreviewButton" @click="previewMyInstantsSound(sound)">{{ myInstantsPreview?.src === sound.sound ? '▶ Tocando' : '▶ Ouvir' }}</button>
@@ -2376,16 +2615,7 @@ button:hover {
 .savedDeckFormat { max-width: 100%; overflow: hidden; padding: 4px 9px; border: 1px solid #56476e; border-radius: 999px; background: #332944; color: #d0c0ff; font-size: 13px; font-weight: 700; letter-spacing: 0.03em; text-overflow: ellipsis; white-space: nowrap; }
 .savedDeckRow small { overflow: hidden; color: #9692a1; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .savedDeckOpen { align-self: flex-end; flex: none; color: #c0adff; font-size: 14px; font-weight: 600; }
-.manualDeckImport { margin-top: 18px; border-top: 1px solid #2b2e39; padding-top: 12px; }
-.manualDeckImport summary { color: #9895a2; cursor: pointer; font-size: 12px; }
-.manualDeckImport[open] summary { margin-bottom: 12px; }
-.deckImportPanel { width: min(760px, 100%); margin: auto; padding: 26px; }
-.deckInput { width: 100%; min-height: 300px; resize: vertical; padding: 14px; border: 1px solid #34313f; border-radius: 12px; outline: none; background: #12131a; color: #e9e6ef; font: 14px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; }
-.deckInput:focus { border-color: #7866bd; }
-.deckImportActions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }
-.deckImportActions button { min-height: 38px; padding: 0 14px; }
-.deckImportError, .deckImportWarning { color: #f0b7a9; font-size: 13px; }
-.deckImportError { margin: 12px 0 0; }
+.deckImportWarning { color: #f0b7a9; font-size: 13px; }
 .deckWorkspace { flex: 1; min-height: 0; overflow: auto; padding: 16px; scrollbar-color: #35303e transparent; }
 .deckSummary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; margin-bottom: 12px; color: #e9e6ef; font-size: 14px; }
 .deckSummary span, .deckUnresolved p { color: #85838f; font-size: 12px; }
@@ -2665,6 +2895,23 @@ button:hover {
 
 .topNavigation button:hover { transform: none; background: #171a22; color: #f0eef9; }
 .topNavigation button.active { border-color: #37304f; background: #211e31; color: #c4b4ff; }
+
+.applicationUpdateNotice { display: flex; flex: none; align-items: center; gap: 20px; padding: 12px 30px; border-bottom: 1px solid #574725; background: linear-gradient(100deg, #292315, #191820 72%); color: #eee8d8; }
+.applicationUpdateCopy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 3px; }
+.applicationUpdateEyebrow { color: #e2c46f; font-size: 9px; font-weight: 800; letter-spacing: .13em; }
+.applicationUpdateCopy strong { color: #fff5d6; font-size: 13px; }
+.applicationUpdateCopy > span:last-child { color: #c7bea8; font-size: 11px; line-height: 1.4; }
+.applicationUpdateActions { display: flex; flex: none; align-items: center; gap: 8px; }
+.applicationUpdateActions button { min-height: 34px; padding: 0 12px; border: 1px solid transparent; border-radius: 8px; cursor: pointer; font-size: 11px; font-weight: 700; }
+.applicationUpdatePrimary { border-color: #a48638 !important; background: #826722; color: #fff8e4; }
+.applicationUpdatePrimary:hover { background: #987b2d; }
+.applicationUpdateSecondary { border-color: #514b3c !important; background: #24232a; color: #c6c0b1; }
+.applicationUpdateProgress { width: 130px; height: 5px; flex: none; overflow: hidden; border-radius: 999px; background: #45403a; }
+.applicationUpdateProgress i { display: block; height: 100%; border-radius: inherit; background: #e4c369; transition: width 180ms ease; }
+.applicationUpdate-error { border-bottom-color: #62414b; background: linear-gradient(100deg, #2d1c23, #191820 72%); }
+.applicationUpdate-error .applicationUpdateEyebrow { color: #e69aa9; }
+.applicationUpdate-error .applicationUpdateCopy strong { color: #ffe2e7; }
+.applicationUpdate-error .applicationUpdateCopy > span:last-child { color: #d4adb4; }
 
 .brandMark {
   width: 48px;
@@ -2986,6 +3233,12 @@ button:hover {
   min-height: 0;
   flex-direction: column;
 }
+
+.cardWorkspaceTabs { display: inline-flex; flex: none; width: fit-content; gap: 4px; margin: 0 0 16px; padding: 4px; border: 1px solid #302d3b; border-radius: 10px; background: #14141b; }
+.cardWorkspaceTabs button { min-width: 100px; min-height: 34px; padding: 0 14px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: #aaa5b5; font-size: 12px; font-weight: 650; cursor: pointer; }
+.cardWorkspaceTabs button:hover { background: #201d29; color: #e8e3f1; }
+.cardWorkspaceTabs button.selected { border-color: #4a3b69; background: #282137; color: #dfd2ff; }
+.soundManager > .cardWorkspaceTabs { margin: 0; padding: 12px 16px 0; border: 0; border-radius: 0; background: transparent; }
 
 .cardSearchPage .pageHeader { margin-bottom: 16px; }
 
@@ -3413,11 +3666,18 @@ button:disabled { cursor: not-allowed; filter: grayscale(0.5); opacity: 0.48; }
 .myInstantsNotice { border: 1px solid #344338; background: #1c2821; color: #a7d8b6; }
 .myInstantsLoading, .myInstantsEmpty { display: flex; min-height: 100px; align-items: center; justify-content: center; gap: 10px; color: #aaa6b4; font-size: 13px; }
 .myInstantsResults { min-height: 0; overflow-y: auto; padding: 2px 22px 18px; scrollbar-color: #393540 transparent; }
-.myInstantsResult { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 11px 0; border-bottom: 1px solid #292832; }
+.myInstantsResultsHeader, .myInstantsResult { display: grid; grid-template-columns: minmax(0, 1fr) 72px auto; align-items: center; gap: 14px; }
+.myInstantsResultsHeader { padding: 4px 0 8px; color: #898693; font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.myInstantsResultsHeader span:nth-child(2) { text-align: center; }
+.myInstantsResultsHeader span:last-child { text-align: right; }
+.myInstantsResult { padding: 11px 0; border-bottom: 1px solid #292832; }
 .myInstantsResultInfo { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
 .myInstantsResultInfo strong { color: #eeeaf5; font-size: 14px; }
 .myInstantsResultInfo span { overflow: hidden; color: #c9aa55; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .myInstantsResultInfo small { overflow: hidden; color: #8e8b98; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.myInstantsResultDuration { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.myInstantsResultDuration small { color: #8e8b98; font-size: 10px; }
+.myInstantsResultDuration strong { color: #ddd9e6; font-size: 13px; font-variant-numeric: tabular-nums; }
 .myInstantsResultActions { display: flex; flex: none; gap: 7px; }
 .myInstantsPreviewButton { min-height: 36px; padding: 0 10px; border: 1px solid #3e3b48; border-radius: 8px; background: #24232c; color: #d4cfdf; cursor: pointer; font-size: 12px; }
 .myInstantsAssignButton { min-height: 36px; padding: 0 11px; font-size: 12px; }
@@ -3454,6 +3714,11 @@ button:disabled { cursor: not-allowed; filter: grayscale(0.5); opacity: 0.48; }
 }
 
 @media (max-width: 680px) {
+  .applicationUpdateNotice { flex-wrap: wrap; gap: 9px 12px; padding: 10px 14px; }
+  .applicationUpdateCopy { flex-basis: calc(100% - 150px); }
+  .applicationUpdateActions { margin-left: auto; }
+  .applicationUpdateProgress { width: 100%; order: 3; }
+  .applicationUpdateActions button { min-height: 31px; padding-right: 9px; padding-left: 9px; }
   .topbarStatus .statusPill:nth-child(2) { display: none; }
   .topbar { flex-wrap: wrap; gap: 8px; padding: 10px 12px; }
   .brandLockup { width: 100%; }
@@ -3479,14 +3744,17 @@ button:disabled { cursor: not-allowed; filter: grayscale(0.5); opacity: 0.48; }
   .soundList { grid-template-columns: 1fr; }
   .deckGrid { grid-template-columns: 1fr; }
   .deckUnresolved ul { grid-template-columns: 1fr; }
-  .deckImportPanel { padding: 16px; }
   .myInstantsOverlay { padding: 10px; }
   .myInstantsModal { max-height: 96vh; }
   .myInstantsHeader, .myInstantsSearchForm { padding-right: 14px; padding-left: 14px; }
   .soundSourceChoices { padding: 14px; }
   .myInstantsRateHint { padding-right: 14px; padding-left: 14px; }
   .myInstantsResults { padding-right: 14px; padding-left: 14px; }
-  .myInstantsResult { align-items: flex-start; flex-direction: column; gap: 8px; }
+  .myInstantsResultsHeader { display: none; }
+  .myInstantsResult { grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px 10px; }
+  .myInstantsResultInfo { grid-column: 1 / -1; }
+  .myInstantsResultDuration { grid-column: 1; grid-row: 2; align-items: flex-start; }
+  .myInstantsResultActions { grid-column: 2; grid-row: 2; flex-wrap: wrap; justify-content: flex-end; }
   .myInstantsError, .myInstantsNotice { margin-right: 14px; margin-left: 14px; }
 }
 
@@ -3538,10 +3806,39 @@ button:disabled { cursor: not-allowed; filter: grayscale(0.5); opacity: 0.48; }
 .settingsPage { display: flex; width: 100%; min-height: 0; flex-direction: column; gap: 10px; padding-bottom: 12px; }
 .settingsHeader { width: min(100%, 700px); flex: none; align-self: center; margin: 0 auto 2px; padding: 4px 2px 8px; border-bottom: 0; }
 .settingsScopeCard { box-sizing: border-box; width: min(100%, 700px); margin: 0 auto; padding: 16px; border: 1px solid #30313d; border-radius: 12px; background: #14151c; }
+.settingsScopeCard button:disabled { opacity: 1; }
 .settingsScopeCard .playerScopeOption { padding: 13px; }
 .settingsScopeCard .playerScopeOption strong { font-size: 14px; }
 .settingsScopeCard .playerScopeOption small { font-size: 12px; }
 .settingsVolumeCard { gap: 10px; }
+.eventSoundsPage { display: flex; width: min(100%, 900px); flex-direction: column; gap: 14px; align-self: center; margin: 0 auto; padding-bottom: 18px; }
+.eventSoundsHeader { width: 100%; margin: 0; padding: 4px 2px 10px; border-bottom: 0; }
+.eventSoundsHeader .eyebrow { display: block; margin-bottom: 5px; }
+.eventSoundsHeader h1 { margin: 0; color: #f0edf7; font-size: 25px; letter-spacing: -0.025em; }
+.eventSoundsHeader p { margin: 5px 0 0; color: #a5a1b0; font-size: 13px; }
+.eventSoundsGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.eventSoundCard { display: grid; min-height: 112px; grid-template-columns: 44px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 15px; border: 1px solid #302e3b; border-radius: 13px; background: linear-gradient(145deg, #191821, #12131a); }
+.eventSoundIcon { display: grid; width: 42px; height: 42px; place-items: center; border: 1px solid #50466b; border-radius: 12px; background: #242033; color: #c0a9ff; }
+.eventSoundIcon svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.eventSoundIcon.event-victory { border-color: #39654c; background: #18291e; color: #81d59d; }
+.eventSoundIcon.event-defeat { border-color: #654047; background: #2d1b21; color: #f0959f; }
+.eventSoundIcon.event-damage-taken { border-color: #654c36; background: #2b2117; color: #f0bd75; }
+.eventSoundIcon.event-damage-dealt { border-color: #3b566e; background: #192531; color: #82c6f1; }
+.eventSoundInfo { min-width: 0; }
+.eventSoundInfo h2 { margin: 0; color: #eeeaf6; font-size: 15px; font-weight: 720; }
+.eventSoundInfo p { margin: 3px 0 7px; color: #a5a1b0; font-size: 11px; line-height: 1.35; }
+.eventSoundFile { display: block; overflow: hidden; color: #8e8999; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.eventSoundFile.assigned { color: #c0b1e6; }
+.eventSoundActions { display: flex; align-items: center; gap: 6px; }
+.eventSoundUpload { display: grid; width: 33px; height: 33px; padding: 0; place-items: center; border: 1px solid #594a75; border-radius: 8px; background: #242033; color: #c5afff; cursor: pointer; }
+.eventSoundUpload:hover { border-color: #a58be4; background: #302744; }
+.eventSoundUpload svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.eventSoundUpload input { display: none; }
+.eventSoundUpload.disabled { cursor: wait; opacity: .55; }
+.eventSoundActions .iconActionButton { width: 33px; height: 33px; }
+.eventSoundActions .iconActionButton svg { width: 17px; height: 17px; }
+.eventSoundError { grid-column: 2 / -1; margin: -3px 0 0; color: #ff9b9b; font-size: 11px; }
+.eventSoundsHint { margin: -4px 2px 0; color: #898593; font-size: 11px; }
 .volumeHeading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .volumeHeading h2 { margin: 0 0 4px; color: #e7e2ef; font-size: 14px; }
 .volumeHeading p { margin: 0; color: #aaa4b6; font-size: 12px; line-height: 1.45; }
@@ -3569,6 +3866,10 @@ button:disabled { cursor: not-allowed; filter: grayscale(0.5); opacity: 0.48; }
 .themeModeError { margin: 0; color: #ef9b9b; font-size: 11px; }
 
 .libraryFavoritesFilter.active { border-color: #8066bd; background: #282238; color: #e1d4ff; }
+.soundManager.soundLibraryPage { flex: 0 0 auto; height: auto; min-height: 100%; overflow: visible; }
+.soundLibraryPage .managerHeader, .soundLibraryPage .soundFilterBar { flex: none; }
+.soundLibraryPage .librarySoundList { flex: none; min-height: 0; overflow: visible; align-content: start; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); }
+.content { scrollbar-gutter: stable; }
 .libraryFeedback { flex: none; margin: 10px 14px 0; padding: 9px 11px; border: 1px solid; border-radius: 8px; font-size: 12px; }
 .libraryFeedbackSuccess { border-color: #365747; background: #17241f; color: #b9e5c9; }
 .libraryFeedbackError { border-color: #57373b; background: #2a1c21; color: #f0acb3; }
@@ -3617,6 +3918,7 @@ button:disabled { cursor: not-allowed; filter: grayscale(0.5); opacity: 0.48; }
 
 @media (max-width: 680px) {
   .librarySoundList { grid-template-columns: 1fr; }
+  .soundLibraryPage .librarySoundList { grid-template-columns: 1fr; }
   .libraryAssignBody { padding-right: 14px; padding-left: 14px; }
   .libraryAssignFooter { padding-right: 14px; padding-left: 14px; }
 }
@@ -3633,6 +3935,23 @@ button:disabled { cursor: not-allowed; filter: grayscale(0.5); opacity: 0.48; }
 .theme-light .topNavigation button { color: #54515e; }
 .theme-light .topNavigation button:hover { background: #f0eef5; color: #282432; }
 .theme-light .topNavigation button.active { border-color: #d4c8ef; background: #eee9f8; color: #4b347e; }
+.theme-light .applicationUpdateNotice { border-bottom-color: #e6d29c; background: linear-gradient(100deg, #fff7e3, #f6f4f9 72%); color: #302d37; }
+.theme-light .applicationUpdateEyebrow { color: #79580d; }
+.theme-light .applicationUpdateCopy strong { color: #3c321c; }
+.theme-light .applicationUpdateCopy > span:last-child { color: #5e5541; }
+.theme-light .applicationUpdatePrimary { border-color: #75570e !important; background: #805f12; color: #fff; }
+.theme-light .applicationUpdatePrimary:hover { background: #684b0d; }
+.theme-light .applicationUpdateSecondary { border-color: #d4cfda; background: #fff; color: #4e4a57; }
+.theme-light .applicationUpdateProgress { background: #ded6c5; }
+.theme-light .applicationUpdateProgress i { background: #85620f; }
+.theme-light .applicationUpdate-error { border-bottom-color: #e3bfc3; background: linear-gradient(100deg, #fff0f1, #f6f4f9 72%); }
+.theme-light .applicationUpdate-error .applicationUpdateEyebrow { color: #902e3c; }
+.theme-light .applicationUpdate-error .applicationUpdateCopy strong { color: #762934; }
+.theme-light .applicationUpdate-error .applicationUpdateCopy > span:last-child { color: #7c4650; }
+.theme-light .cardWorkspaceTabs { border-color: #d8d4e2; background: #f3f1f6; }
+.theme-light .cardWorkspaceTabs button { color: #5b5667; }
+.theme-light .cardWorkspaceTabs button:hover { background: #e9e5ef; color: #302d39; }
+.theme-light .cardWorkspaceTabs button.selected { border-color: #d1c4e7; background: #fff; color: #4b347e; box-shadow: 0 1px 3px rgba(32, 27, 45, .08); }
 .theme-light .statusPill { color: #5d606b; }
 .theme-light .statusReady i { background: #26784f; }
 .theme-light .statusPending i { background: #8a5a00; }
@@ -3685,14 +4004,10 @@ button:disabled { cursor: not-allowed; filter: grayscale(0.5); opacity: 0.48; }
 .theme-light .deckFormatSelectChevron { stroke: #514d5c; }
 .theme-light .deckFormatCount { border-color: #d8d3e1; background: #fff; color: #55515f; }
 .theme-light .deckFormatCount strong { color: #4a347c; }
-.theme-light .manualDeckImport { border-top-color: #e0dfe6; }
-.theme-light .manualDeckImport summary { color: #4d4c58; }
-.theme-light .deckInput { border-color: #cfccd8; background: #fff; color: #2c2935; }
-.theme-light .deckInput:focus { border-color: #7255b4; }
 .theme-light .deckSummary, .theme-light .deckCard, .theme-light .soundRow { border-color: #d9dce4; background: #fff; color: #302d39; box-shadow: 0 2px 8px rgba(39, 34, 56, 0.04); }
 .theme-light .deckSummary strong, .theme-light .deckCardInfo strong, .theme-light .soundDetails strong { color: #292632; }
 .theme-light .deckSummary span, .theme-light .soundDetails span { color: #555966; }
-.theme-light .deckCardError, .theme-light .deckImportError, .theme-light .deckImportWarning { color: #8b2635; }
+.theme-light .deckCardError, .theme-light .deckImportWarning { color: #8b2635; }
 .theme-light .deckLogMessage { border-color: #e4c8c1; background: #fff2ef; color: #712d25; }
 .theme-light .deckFilterBar input, .theme-light .soundFilterBar input { border-color: #cbc9d4; background: #fff; color: #292632; }
 .theme-light .deckFilterBar label, .theme-light .deckFilterBar > span, .theme-light .soundFilterBar > span { color: #565966; }
@@ -3792,6 +4107,8 @@ button:disabled { cursor: not-allowed; filter: grayscale(0.5); opacity: 0.48; }
 .theme-light .myInstantsResultInfo strong { color: #292632; }
 .theme-light .myInstantsResultInfo span { color: #664b16; }
 .theme-light .myInstantsResultInfo small { color: #565966; }
+.theme-light .myInstantsResultsHeader, .theme-light .myInstantsResultDuration small { color: #65616e; }
+.theme-light .myInstantsResultDuration strong { color: #302d39; }
 .theme-light .myInstantsPreviewButton { border-color: #d1ced8; background: #f2f1f5; color: #393643; }
 .theme-light .myInstantsPagination { color: #555966; }
 .theme-light .myInstantsError, .theme-light .selectedCardSourceError { border-color: #e3bfc3; background: #fff0f1; color: #8f2935; }
@@ -3812,12 +4129,10 @@ button:disabled { cursor: not-allowed; filter: grayscale(0.5); opacity: 0.48; }
 .theme-light .myInstantsPreviewButton { border-color: #c9c5d2; background: #f0eef4; color: #393543; }
 .theme-light .secondaryButton:hover:not(:disabled),
 .theme-light .myInstantsPreviewButton:hover:not(:disabled) { border-color: #8d78b3; background: #e8e3f0; }
-.theme-light .deckImportActions button,
 .theme-light .saveButton,
 .theme-light .deckSaveButton,
 .theme-light .myInstantsSearchButton,
 .theme-light .myInstantsAssignButton { border-color: #563b88; background: #604590; color: #fff; }
-.theme-light .deckImportActions button:hover:not(:disabled),
 .theme-light .saveButton:hover:not(:disabled),
 .theme-light .deckSaveButton:hover:not(:disabled),
 .theme-light .myInstantsSearchButton:hover:not(:disabled),
@@ -3871,9 +4186,21 @@ button:disabled { cursor: not-allowed; filter: grayscale(0.5); opacity: 0.48; }
 .theme-light .myInstantsPagination button:hover:not(:disabled) { border-color: #8d78b3; background: #e8e3f0; }
 .theme-light .cardPreviewError { color: #8f2935; }
 .theme-light .managerHeader { border-bottom-color: #dfe1e8; }
-.theme-light .manualDeckImport summary:hover { color: #38275c; }
+.theme-light .eventSoundsHeader h1, .theme-light .eventSoundInfo h2 { color: #292632; }
+.theme-light .eventSoundsHeader p, .theme-light .eventSoundInfo p { color: #555966; }
+.theme-light .eventSoundCard { border-color: #d8d4e2; background: linear-gradient(145deg, #fff, #f5f3f8); }
+.theme-light .eventSoundFile { color: #666371; }
+.theme-light .eventSoundFile.assigned { color: #503a80; }
+.theme-light .eventSoundUpload { border-color: #c4b5df; background: #eee9f6; color: #4c367b; }
+.theme-light .eventSoundUpload:hover { border-color: #876ab7; background: #e3daf1; }
+.theme-light .eventSoundsHint { color: #555966; }
+.theme-light .eventSoundError { color: #8f2935; }
 .theme-light :is(input, textarea, select)::placeholder { color: #686572; opacity: 1; }
 .theme-light :is(button, a, input, textarea, select):focus-visible { outline: 2px solid #5f4399; outline-offset: 2px; }
+
+@media (max-width: 720px) {
+  .eventSoundsGrid { grid-template-columns: 1fr; }
+}
 
 @media (prefers-reduced-motion: reduce) {
   .theme-light *, .theme-light *::before, .theme-light *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
