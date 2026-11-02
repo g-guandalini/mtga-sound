@@ -74,6 +74,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   listSounds: () =>
     ipcRenderer.invoke('sounds:list'),
 
+  listSoundLibrary: () => ipcRenderer.invoke('sound-library:list'),
+  setSoundLibraryMetadata: (data: { soundPath?: string; soundPaths?: string[]; favorite?: boolean; tags?: string[] }) =>
+    ipcRenderer.invoke('sound-library:metadata:set', data),
+  mergeSoundLibraryDuplicates: (data: { soundPaths: string[]; keepSoundPath: string }) =>
+    ipcRenderer.invoke('sound-library:merge', data),
+  assignSoundFromLibrary: (data: { soundPath: string; grpIds: number[] }) =>
+    ipcRenderer.invoke('sound-library:assign', data),
+
   openMyInstants: () =>
     ipcRenderer.invoke('myinstants:open'),
 

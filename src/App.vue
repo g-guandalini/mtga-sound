@@ -27,7 +27,7 @@ const savingAutoStartWithArena = ref(false)
 const autoStartWithArenaError = ref('')
 
 const selectedCard = ref<any | null>(null)
-const currentView = ref<'cards' | 'sounds' | 'deck' | 'settings'>('deck')
+const currentView = ref<'cards' | 'sounds' | 'library' | 'deck' | 'settings'>('deck')
 const deckInput = ref('')
 const deckCards = ref<any[]>([])
 const deckCardFilter = ref('')
@@ -76,6 +76,47 @@ const filteredSoundMappings = computed(() => {
 const loadingSounds = ref(false)
 const soundManagerError = ref('')
 const soundActionError = ref('')
+const soundLibrary = ref<Array<{
+  contentHash: string
+  soundPath: string
+  soundPaths: string[]
+  soundFile: string
+  soundFiles: string[]
+  duplicateCount: number
+  grpIds: number[]
+  cardNames: string[]
+  favorite: boolean
+  tags: string[]
+}>>([])
+const soundLibraryLoading = ref(false)
+const soundLibraryError = ref('')
+const soundLibraryNotice = ref('')
+const soundLibraryFilter = ref('')
+const soundLibraryFavoritesOnly = ref(false)
+const savingLibrarySound = ref('')
+const libraryMergeTarget = ref<any | null>(null)
+const libraryMerging = ref(false)
+const libraryMergeError = ref('')
+const libraryAssignTarget = ref<any | null>(null)
+const libraryCardSearch = ref('')
+const libraryCardSearchResults = ref<any[]>([])
+const libraryCardSearchLoading = ref(false)
+const libraryCardSearchError = ref('')
+const librarySelectedCard = ref<any | null>(null)
+const libraryExistingAudio = ref<any | null>(null)
+const libraryAssigning = ref(false)
+const libraryAssignError = ref('')
+let libraryCardSearchTimer: ReturnType<typeof setTimeout> | undefined
+let libraryCardSearchRequest = 0
+const filteredSoundLibrary = computed(() => {
+  const query = soundLibraryFilter.value.trim().toLocaleLowerCase()
+  return soundLibrary.value.filter((sound) => {
+    if (soundLibraryFavoritesOnly.value && !sound.favorite) return false
+    if (!query) return true
+    return [sound.soundFile, ...sound.soundFiles, ...sound.cardNames, ...sound.tags]
+      .some((value) => value.toLocaleLowerCase().includes(query))
+  })
+})
 const cardPreview = ref<any | null>(null)
 const activeAudio = new Set<HTMLAudioElement>()
 const replacementInput = ref<HTMLInputElement | null>(null)
@@ -270,6 +311,182 @@ async function openSoundManager() {
       'Não foi possível carregar os sons. Reinicie o aplicativo e tente novamente.'
   } finally {
     loadingSounds.value = false
+  }
+}
+
+async function refreshSoundLibrary() {
+  soundLibraryLoading.value = true
+  soundLibraryError.value = ''
+  try {
+    soundLibrary.value = await window.electronAPI.listSoundLibrary()
+  } catch (error) {
+    console.error(error)
+    soundLibraryError.value = error instanceof Error
+      ? error.message
+      : 'Não foi possível carregar a biblioteca de sons.'
+  } finally {
+    soundLibraryLoading.value = false
+  }
+}
+
+async function openSoundLibrary() {
+  currentView.value = 'library'
+  soundLibraryNotice.value = ''
+  await refreshSoundLibrary()
+}
+
+async function setLibraryFavorite(sound: any) {
+  const favorite = !sound.favorite
+  savingLibrarySound.value = sound.soundPath
+  soundLibraryError.value = ''
+  try {
+    const result = await window.electronAPI.setSoundLibraryMetadata({ soundPaths: sound.soundPaths, favorite })
+    if (!result.success) throw new Error(result.error || 'Não foi possível salvar o favorito.')
+    sound.favorite = favorite
+    soundLibrary.value.sort((a, b) => Number(b.favorite) - Number(a.favorite) || a.soundFile.localeCompare(b.soundFile))
+  } catch (error) {
+    soundLibraryError.value = error instanceof Error ? error.message : 'Não foi possível salvar o favorito.'
+  } finally {
+    savingLibrarySound.value = ''
+  }
+}
+
+async function saveLibraryTags(sound: any, event: Event) {
+  const input = event.target as HTMLInputElement
+  const tags = input.value.split(',').map((tag) => tag.trim()).filter(Boolean).slice(0, 8)
+  savingLibrarySound.value = sound.soundPath
+  soundLibraryError.value = ''
+  try {
+    const result = await window.electronAPI.setSoundLibraryMetadata({ soundPaths: sound.soundPaths, tags })
+    if (!result.success) throw new Error(result.error || 'Não foi possível salvar as tags.')
+    sound.tags = result.tags ?? tags
+    input.value = sound.tags.join(', ')
+  } catch (error) {
+    soundLibraryError.value = error instanceof Error ? error.message : 'Não foi possível salvar as tags.'
+    input.value = sound.tags.join(', ')
+  } finally {
+    savingLibrarySound.value = ''
+  }
+}
+
+function openLibraryAssignment(sound: any) {
+  libraryAssignTarget.value = sound
+  libraryCardSearch.value = ''
+  libraryCardSearchResults.value = []
+  libraryCardSearchError.value = ''
+  librarySelectedCard.value = null
+  libraryExistingAudio.value = null
+  libraryAssignError.value = ''
+}
+
+function closeLibraryAssignment() {
+  if (libraryAssigning.value) return
+  libraryAssignTarget.value = null
+  libraryCardSearchResults.value = []
+  librarySelectedCard.value = null
+  libraryExistingAudio.value = null
+  libraryAssignError.value = ''
+}
+
+function searchLibraryTargetCards() {
+  const query = libraryCardSearch.value.trim()
+  const requestId = ++libraryCardSearchRequest
+  if (libraryCardSearchTimer) clearTimeout(libraryCardSearchTimer)
+  librarySelectedCard.value = null
+  libraryExistingAudio.value = null
+  libraryCardSearchError.value = ''
+  libraryCardSearchResults.value = []
+  if (query.length < 2) {
+    libraryCardSearchLoading.value = false
+    return
+  }
+
+  libraryCardSearchLoading.value = true
+  libraryCardSearchTimer = setTimeout(async () => {
+    try {
+      const results = await window.electronAPI.searchCards(query)
+      if (requestId === libraryCardSearchRequest) libraryCardSearchResults.value = results
+    } catch (error) {
+      if (requestId === libraryCardSearchRequest) {
+        libraryCardSearchError.value = error instanceof Error ? error.message : 'Não foi possível buscar cartas.'
+      }
+    } finally {
+      if (requestId === libraryCardSearchRequest) libraryCardSearchLoading.value = false
+    }
+  }, 220)
+}
+
+async function selectLibraryTargetCard(card: { name: string }) {
+  libraryCardSearchLoading.value = true
+  libraryCardSearchError.value = ''
+  try {
+    const versions = await window.electronAPI.getCardVersions(card.name)
+    if (!versions.length) throw new Error('Não encontrei versões desta carta no banco do Arena.')
+    const grpIds = versions.map((version: any) => Number(version.grp_id))
+    const existing = soundLibrary.value.find((sound) =>
+      sound.grpIds.some((grpId) => grpIds.includes(grpId))
+    )
+    librarySelectedCard.value = { name: card.name, grpIds, versionCount: versions.length }
+    libraryExistingAudio.value = existing ?? null
+    libraryCardSearch.value = card.name
+    libraryCardSearchResults.value = []
+  } catch (error) {
+    libraryCardSearchError.value = error instanceof Error ? error.message : 'Não foi possível selecionar esta carta.'
+  } finally {
+    libraryCardSearchLoading.value = false
+  }
+}
+
+async function assignLibrarySound() {
+  const sound = libraryAssignTarget.value
+  const card = librarySelectedCard.value
+  if (!sound || !card || libraryAssigning.value) return
+  libraryAssigning.value = true
+  libraryAssignError.value = ''
+  try {
+    const result = await window.electronAPI.assignSoundFromLibrary({ soundPath: sound.soundPath, grpIds: card.grpIds })
+    if (!result.success) throw new Error(result.error || 'Não foi possível vincular o áudio.')
+    libraryAssignTarget.value = null
+    librarySelectedCard.value = null
+    libraryExistingAudio.value = null
+    await refreshSoundLibrary()
+    soundLibraryNotice.value = `“${sound.soundFile}” foi vinculado a ${card.name}.`
+  } catch (error) {
+    libraryAssignError.value = error instanceof Error ? error.message : 'Não foi possível vincular o áudio.'
+  } finally {
+    libraryAssigning.value = false
+  }
+}
+
+function openLibraryMerge(sound: any) {
+  libraryMergeTarget.value = sound
+  libraryMergeError.value = ''
+}
+
+function closeLibraryMerge() {
+  if (libraryMerging.value) return
+  libraryMergeTarget.value = null
+  libraryMergeError.value = ''
+}
+
+async function mergeLibraryDuplicates() {
+  const sound = libraryMergeTarget.value
+  if (!sound || sound.duplicateCount < 1 || libraryMerging.value) return
+  libraryMerging.value = true
+  libraryMergeError.value = ''
+  try {
+    const result = await window.electronAPI.mergeSoundLibraryDuplicates({
+      soundPaths: sound.soundPaths,
+      keepSoundPath: sound.soundPath,
+    })
+    if (!result.success) throw new Error(result.error || 'Não foi possível unificar os arquivos.')
+    libraryMergeTarget.value = null
+    await refreshSoundLibrary()
+    soundLibraryNotice.value = `${result.mergedCount ?? sound.duplicateCount} cópia(s) removida(s); ${result.remappedCount ?? 0} vínculo(s) preservado(s).`
+  } catch (error) {
+    libraryMergeError.value = error instanceof Error ? error.message : 'Não foi possível unificar os arquivos.'
+  } finally {
+    libraryMerging.value = false
   }
 }
 
@@ -1035,6 +1252,10 @@ async function assignMyInstantsSound(sound: any) {
           <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 5h12M4 10h12M4 15h8"/><circle cx="16" cy="15" r="2"/></svg>
           <span>Gerenciar sons</span>
         </button>
+        <button type="button" aria-label="Biblioteca de sons" title="Biblioteca de sons" :class="{ active: currentView === 'library' }" @click="openSoundLibrary">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8 15V4l9-2v11"/><circle cx="5" cy="15" r="3"/><circle cx="14" cy="13" r="3"/></svg>
+          <span>Biblioteca</span>
+        </button>
         <button type="button" aria-label="Meus Decks" title="Meus Decks" :class="{ active: currentView === 'deck' }" @click="openMyDecks">
           <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 3.5h7l3 3v10H5z"/><path d="M12 3.5v3h3M7.5 10h5M7.5 13h5"/></svg>
           <span>Meus Decks</span>
@@ -1443,6 +1664,79 @@ async function assignMyInstantsSound(sound: any) {
         </p>
       </div>
 
+      <div v-else-if="currentView === 'library'" class="soundManager soundLibraryPage">
+        <div class="managerHeader">
+          <div>
+            <h1>Biblioteca de sons</h1>
+            <p>Organize e reutilize os áudios já salvos no aplicativo.</p>
+          </div>
+          <div class="managerHeaderActions">
+            <span class="versionBadge">{{ soundLibrary.length }} áudios</span>
+            <button
+              type="button"
+              class="secondaryButton libraryFavoritesFilter"
+              :class="{ active: soundLibraryFavoritesOnly }"
+              :aria-pressed="soundLibraryFavoritesOnly"
+              @click="soundLibraryFavoritesOnly = !soundLibraryFavoritesOnly"
+            >☆ Favoritos</button>
+            <button type="button" class="secondaryButton" :disabled="soundLibraryLoading" @click="refreshSoundLibrary">Atualizar</button>
+          </div>
+        </div>
+
+        <div v-if="soundLibrary.length" class="soundFilterBar">
+          <input v-model="soundLibraryFilter" type="search" placeholder="Buscar por áudio, carta ou tag" aria-label="Buscar na biblioteca de sons">
+          <span>{{ filteredSoundLibrary.length }} de {{ soundLibrary.length }}</span>
+        </div>
+
+        <p v-if="soundLibraryNotice" class="libraryFeedback libraryFeedbackSuccess" role="status">{{ soundLibraryNotice }}</p>
+        <p v-if="soundLibraryError" class="libraryFeedback libraryFeedbackError" role="alert">{{ soundLibraryError }}</p>
+
+        <div v-if="soundLibraryLoading" class="managerEmpty">Carregando biblioteca…</div>
+        <div v-else-if="!soundLibrary.length" class="managerEmpty libraryEmpty">
+          <div class="emptyIcon">♫</div>
+          <h2>Sua biblioteca está vazia</h2>
+          <p>Quando você vincular sons às cartas, eles aparecerão aqui para você organizar e reutilizar.</p>
+        </div>
+        <div v-else-if="filteredSoundLibrary.length" class="soundList librarySoundList">
+          <article v-for="sound in filteredSoundLibrary" :key="sound.soundPath" class="soundRow librarySoundRow">
+            <div class="librarySoundInfo">
+              <strong :title="sound.soundFile">{{ sound.soundFile }}</strong>
+              <small :title="sound.cardNames.join(', ')">Usado em {{ sound.cardNames.length }} {{ sound.cardNames.length === 1 ? 'carta' : 'cartas' }} · {{ sound.cardNames.join(', ') }}</small>
+              <small v-if="sound.duplicateCount" class="libraryDuplicateHint" :title="sound.soundFiles.join(', ')">{{ sound.duplicateCount + 1 }} arquivos com conteúdo idêntico</small>
+            </div>
+            <button
+              type="button"
+              class="libraryFavoriteButton"
+              :class="{ selected: sound.favorite }"
+              :aria-label="sound.favorite ? `Remover ${sound.soundFile} dos favoritos` : `Adicionar ${sound.soundFile} aos favoritos`"
+              :aria-pressed="sound.favorite"
+              :disabled="savingLibrarySound === sound.soundPath"
+              @click="setLibraryFavorite(sound)"
+            >{{ sound.favorite ? '★ Favorito' : '☆ Favoritar' }}</button>
+            <label class="libraryTagsField">
+              <span>Tags <small>(separe por vírgula)</small></span>
+              <input
+                type="text"
+                :value="sound.tags.join(', ')"
+                :disabled="savingLibrarySound === sound.soundPath"
+                placeholder="meme, reação, curto"
+                maxlength="200"
+                :aria-label="`Tags para ${sound.soundFile}`"
+                @change="saveLibraryTags(sound, $event)"
+              >
+            </label>
+            <div class="librarySoundActions">
+              <button type="button" class="iconActionButton playActionButton" :aria-label="`Ouvir ${sound.soundFile}`" title="Ouvir áudio" @click="playSound(sound.grpIds[0])">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 10 6-10 6z"/></svg>
+              </button>
+              <button v-if="sound.duplicateCount" type="button" class="libraryMergeButton" @click="openLibraryMerge(sound)">Unificar {{ sound.duplicateCount }} duplicata(s)</button>
+              <button type="button" class="viewCardButton libraryAssignButton" @click="openLibraryAssignment(sound)">Vincular a uma carta</button>
+            </div>
+          </article>
+        </div>
+        <div v-else class="managerEmpty">Nenhum áudio corresponde a “{{ soundLibraryFilter }}”.</div>
+      </div>
+
       <div
         v-else-if="currentView === 'settings'"
         class="settingsPage"
@@ -1559,6 +1853,71 @@ async function assignMyInstantsSound(sound: any) {
       <span aria-hidden="true">|</span>
       <span>Desenvolvido por <a href="https://github.com/g-guandalini" target="_blank" rel="noopener noreferrer">Guandalini</a></span>
     </footer>
+    <div v-if="libraryAssignTarget" class="myInstantsOverlay" @click.self="closeLibraryAssignment">
+      <section class="myInstantsModal libraryAssignModal" role="dialog" aria-modal="true" aria-labelledby="library-assign-title">
+        <header class="myInstantsHeader">
+          <div>
+            <span>BIBLIOTECA DE SONS</span>
+            <h2 id="library-assign-title">Vincular áudio a uma carta</h2>
+            <p>O arquivo “{{ libraryAssignTarget.soundFile }}” será reutilizado sem criar outra cópia.</p>
+          </div>
+          <button type="button" class="myInstantsBackButton" aria-label="Fechar" :disabled="libraryAssigning" @click="closeLibraryAssignment">×</button>
+        </header>
+        <div class="libraryAssignBody">
+          <label class="libraryTargetSearchLabel">
+            Buscar carta
+            <input v-model="libraryCardSearch" type="search" placeholder="Digite o nome da carta em inglês" autocomplete="off" @input="searchLibraryTargetCards">
+          </label>
+          <div v-if="libraryCardSearchLoading" class="myInstantsLoading"><span class="processingSpinner"></span>Buscando cartas…</div>
+          <div v-else-if="libraryCardSearchResults.length" class="libraryTargetResults">
+            <button v-for="card in libraryCardSearchResults" :key="card.name" type="button" @click="selectLibraryTargetCard(card)">{{ card.name }}</button>
+          </div>
+          <p v-else-if="libraryCardSearch.trim().length >= 2 && !libraryCardSearchError && !librarySelectedCard" class="libraryTargetHint">Nenhuma carta encontrada.</p>
+          <p v-if="libraryCardSearchError" class="libraryFeedback libraryFeedbackError" role="alert">{{ libraryCardSearchError }}</p>
+
+          <div v-if="librarySelectedCard" class="librarySelectedTarget">
+            <strong>{{ librarySelectedCard.name }}</strong>
+            <span>{{ librarySelectedCard.versionCount }} versões serão vinculadas</span>
+            <p v-if="libraryExistingAudio && libraryExistingAudio.soundPath === libraryAssignTarget.soundPath" class="libraryAlreadyLinked">Esta carta já usa este áudio.</p>
+            <p v-else-if="libraryExistingAudio" class="libraryReplaceNotice">Esta carta já usa “{{ libraryExistingAudio.soundFile }}”. Ao continuar, esse vínculo será substituído.</p>
+          </div>
+          <p v-if="libraryAssignError" class="libraryFeedback libraryFeedbackError" role="alert">{{ libraryAssignError }}</p>
+        </div>
+        <footer class="libraryAssignFooter">
+          <button type="button" class="secondaryButton" :disabled="libraryAssigning" @click="closeLibraryAssignment">Cancelar</button>
+          <button
+            type="button"
+            class="myInstantsAssignButton"
+            :disabled="!librarySelectedCard || libraryAssigning || (libraryExistingAudio?.soundPath === libraryAssignTarget.soundPath)"
+            @click="assignLibrarySound"
+          >{{ libraryAssigning ? 'Vinculando…' : libraryExistingAudio ? 'Substituir e vincular' : 'Vincular áudio' }}</button>
+        </footer>
+      </section>
+    </div>
+    <div v-if="libraryMergeTarget" class="myInstantsOverlay" @click.self="closeLibraryMerge">
+      <section class="myInstantsModal libraryAssignModal" role="dialog" aria-modal="true" aria-labelledby="library-merge-title">
+        <header class="myInstantsHeader">
+          <div>
+            <span>ORGANIZAR BIBLIOTECA</span>
+            <h2 id="library-merge-title">Unificar arquivos duplicados?</h2>
+            <p>O conteúdo foi comparado e estes arquivos são idênticos.</p>
+          </div>
+          <button type="button" class="myInstantsBackButton" aria-label="Fechar" :disabled="libraryMerging" @click="closeLibraryMerge">×</button>
+        </header>
+        <div class="libraryAssignBody">
+          <div class="librarySelectedTarget">
+            <strong>{{ libraryMergeTarget.soundFiles.length }} arquivos idênticos</strong>
+            <span>{{ libraryMergeTarget.soundFiles.join(' · ') }}</span>
+            <p>Será mantido “{{ libraryMergeTarget.soundFile }}”. Os vínculos, favoritos e tags serão preservados; as cópias redundantes serão apagadas.</p>
+          </div>
+          <p v-if="libraryMergeError" class="libraryFeedback libraryFeedbackError" role="alert">{{ libraryMergeError }}</p>
+        </div>
+        <footer class="libraryAssignFooter">
+          <button type="button" class="secondaryButton" :disabled="libraryMerging" @click="closeLibraryMerge">Cancelar</button>
+          <button type="button" class="myInstantsAssignButton" :disabled="libraryMerging" @click="mergeLibraryDuplicates">{{ libraryMerging ? 'Unificando…' : 'Unificar arquivos' }}</button>
+        </footer>
+      </section>
+    </div>
     <div v-if="cardPreview" class="cardPreviewOverlay" @click.self="closeCardPreview">
       <section class="cardPreviewModal" role="dialog" aria-modal="true" :aria-label="`Imagens de ${cardPreview.name}`">
         <header class="cardPreviewHeader">
@@ -3209,6 +3568,59 @@ button:disabled { cursor: not-allowed; filter: grayscale(0.5); opacity: 0.48; }
 .themeModeOption.selected > i { border: 4px solid #b6a0f0; background: #fff; }
 .themeModeError { margin: 0; color: #ef9b9b; font-size: 11px; }
 
+.libraryFavoritesFilter.active { border-color: #8066bd; background: #282238; color: #e1d4ff; }
+.libraryFeedback { flex: none; margin: 10px 14px 0; padding: 9px 11px; border: 1px solid; border-radius: 8px; font-size: 12px; }
+.libraryFeedbackSuccess { border-color: #365747; background: #17241f; color: #b9e5c9; }
+.libraryFeedbackError { border-color: #57373b; background: #2a1c21; color: #f0acb3; }
+.libraryEmpty { max-width: 560px; }
+.libraryEmpty .emptyIcon { margin: 0 0 12px; color: #b9a4ef; font-size: 40px; }
+.libraryEmpty h2 { margin: 0 0 7px; }
+.libraryEmpty p { max-width: 420px; margin: 0 auto; line-height: 1.5; }
+.librarySoundList { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+.librarySoundRow { display: grid; min-height: 0; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 13px; }
+.librarySoundInfo { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
+.librarySoundInfo strong { overflow: hidden; color: #f1eef8; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.librarySoundInfo small { display: -webkit-box; overflow: hidden; color: #9692a1; font-size: 11px; line-height: 1.4; text-overflow: ellipsis; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.librarySoundInfo .libraryDuplicateHint { color: #d4bd7c; }
+.libraryFavoriteButton { min-height: 30px; padding: 5px 9px; border: 1px solid #494252; border-radius: 8px; background: #211f29; color: #bdb7c8; cursor: pointer; font-size: 11px; font-weight: 650; white-space: nowrap; }
+.libraryFavoriteButton:hover:not(:disabled) { border-color: #84704a; background: #2c281f; }
+.libraryFavoriteButton.selected { border-color: #725d32; background: #332b1a; color: #f0d589; }
+.libraryTagsField { display: grid; grid-column: 1 / -1; gap: 5px; color: #a9a5b2; font-size: 11px; }
+.libraryTagsField > span small { color: #777381; }
+.libraryTagsField input { width: 100%; min-height: 32px; padding: 6px 9px; border: 1px solid #353342; border-radius: 7px; outline: none; background: #11131a; color: #e8e5ee; font: inherit; font-size: 12px; }
+.libraryTagsField input:focus { border-color: #7866bd; }
+.libraryTagsField input::placeholder { color: #777381; }
+.librarySoundActions { display: flex; grid-column: 1 / -1; align-items: center; justify-content: flex-end; gap: 7px; }
+.librarySoundActions .iconActionButton { width: 32px; height: 32px; }
+.librarySoundActions button { margin-top: 0; }
+.libraryMergeButton { min-height: 32px; padding: 6px 9px; border: 1px solid #695a34; border-radius: 8px; background: #2d281c; color: #e8d397; cursor: pointer; font-size: 11px; font-weight: 650; }
+.libraryMergeButton:hover { border-color: #9b8143; background: #39311f; }
+.libraryAssignButton { min-height: 32px; padding: 6px 10px; font-size: 12px; }
+.libraryAssignModal { width: min(540px, 100%); }
+.libraryAssignBody { display: flex; min-height: 0; flex-direction: column; gap: 12px; overflow: auto; padding: 18px 22px; }
+.libraryTargetSearchLabel { display: grid; gap: 6px; color: #bbb6c5; font-size: 12px; font-weight: 650; }
+.libraryTargetSearchLabel input { width: 100%; min-height: 40px; padding: 8px 11px; border: 1px solid #3d3948; border-radius: 8px; outline: none; background: #0e1016; color: #f1eef8; font-size: 14px; }
+.libraryTargetSearchLabel input:focus { border-color: #8b7740; }
+.libraryTargetResults { display: flex; max-height: 230px; flex-direction: column; overflow-y: auto; border: 1px solid #302e3a; border-radius: 9px; background: #13141b; }
+.libraryTargetResults button { min-height: 38px; padding: 8px 11px; border: 0; border-bottom: 1px solid #292832; border-radius: 0; background: transparent; color: #e8e5ee; text-align: left; cursor: pointer; font-size: 13px; }
+.libraryTargetResults button:last-child { border-bottom: 0; }
+.libraryTargetResults button:hover { background: #252130; }
+.libraryTargetHint { margin: 0; color: #9995a3; font-size: 12px; }
+.librarySelectedTarget { display: flex; flex-direction: column; gap: 4px; padding: 12px; border: 1px solid #3d354d; border-radius: 9px; background: #1b1923; }
+.librarySelectedTarget strong { color: #eeeaf5; font-size: 14px; }
+.librarySelectedTarget > span { color: #a8a2b2; font-size: 12px; }
+.librarySelectedTarget p { margin: 4px 0 0; font-size: 12px; line-height: 1.45; }
+.libraryReplaceNotice { color: #edce86; }
+.libraryAlreadyLinked { color: #a9dfbd; }
+.libraryAssignBody .libraryFeedback { margin: 0; }
+.libraryAssignFooter { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 22px 18px; border-top: 1px solid #2b2a35; }
+
+@media (max-width: 680px) {
+  .librarySoundList { grid-template-columns: 1fr; }
+  .libraryAssignBody { padding-right: 14px; padding-left: 14px; }
+  .libraryAssignFooter { padding-right: 14px; padding-left: 14px; }
+}
+
 /* Light appearance: explicit surface and text colors keep every view readable. */
 .container.theme-light {
   background: #f4f5f8;
@@ -3289,6 +3701,33 @@ button:disabled { cursor: not-allowed; filter: grayscale(0.5); opacity: 0.48; }
 .theme-light .managerEmpty h2 { color: #34323e; }
 
 .theme-light .soundRow { background: #fff; }
+.theme-light .librarySoundInfo strong { color: #292632; }
+.theme-light .librarySoundInfo small { color: #555966; }
+.theme-light .librarySoundInfo .libraryDuplicateHint { color: #624b0e; }
+.theme-light .libraryMergeButton { border-color: #d6bd72; background: #fff6d9; color: #624b0e; }
+.theme-light .libraryMergeButton:hover { border-color: #ad913a; background: #ffefb7; }
+.theme-light .libraryFavoritesFilter.active { border-color: #aa96d0; background: #eee9f8; color: #493276; }
+.theme-light .libraryFeedbackSuccess { border-color: #b9d9c3; background: #edf8f0; color: #245d39; }
+.theme-light .libraryFeedbackError { border-color: #e3bfc3; background: #fff0f1; color: #8f2935; }
+.theme-light .libraryFavoriteButton { border-color: #d0cbd7; background: #f4f2f6; color: #494653; }
+.theme-light .libraryFavoriteButton:hover:not(:disabled) { border-color: #aa96d0; background: #f2eef8; }
+.theme-light .libraryFavoriteButton.selected { border-color: #d6bd72; background: #fff6d9; color: #624b0e; }
+.theme-light .libraryTagsField { color: #4f4c58; }
+.theme-light .libraryTagsField > span small { color: #65616d; }
+.theme-light .libraryTagsField input,
+.theme-light .libraryTargetSearchLabel input { border-color: #cbc8d3; background: #fff; color: #292632; }
+.theme-light .libraryTagsField input::placeholder,
+.theme-light .libraryTargetHint { color: #5b5864; }
+.theme-light .libraryTargetSearchLabel { color: #494653; }
+.theme-light .libraryTargetResults { border-color: #d8d5df; background: #fff; }
+.theme-light .libraryTargetResults button { border-bottom-color: #e6e3eb; background: #fff; color: #353340; }
+.theme-light .libraryTargetResults button:hover { background: #f2eff8; }
+.theme-light .librarySelectedTarget { border-color: #d5cbe6; background: #f7f4fb; }
+.theme-light .librarySelectedTarget strong { color: #292632; }
+.theme-light .librarySelectedTarget > span { color: #56535f; }
+.theme-light .libraryReplaceNotice { color: #684b09; }
+.theme-light .libraryAlreadyLinked { color: #245d39; }
+.theme-light .libraryAssignFooter { border-top-color: #e0dee6; }
 .theme-light .soundImageFallback { border: 1px solid #d8d6df; background: #f0eff4; color: #514d5c; }
 .theme-light .cardTriggerControl { color: #4f4c58; }
 .theme-light .triggerModeGroup { border-color: #d4d1db; background: #f3f2f6; }

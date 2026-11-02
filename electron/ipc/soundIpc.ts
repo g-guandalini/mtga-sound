@@ -1,5 +1,6 @@
 import { app, dialog, ipcMain, shell } from 'electron'
 import axios from 'axios'
+import { createHash } from 'node:crypto'
 import fs from 'fs'
 import path from 'path'
 
@@ -11,6 +12,8 @@ import { getDb } from '../database/init'
 import { USER_DATA_DIR } from '../services/paths'
 
 const SOUNDS_DIR = path.join(USER_DATA_DIR, 'sounds')
+const SOUND_LIBRARY_FILE = path.join(USER_DATA_DIR, 'data', 'soundLibrary.json')
+const soundHashCache = new Map<string, { size: number; modifiedAt: number; hash: string }>()
 
 function isTrustedMyInstantsUrl(value: string) {
   try {
@@ -28,6 +31,8 @@ type ManagedSound = {
   soundFile: string
   isLand: boolean
 }
+
+type SoundLibraryMetadata = Record<string, { favorite?: boolean; tags?: string[] }>
 
 function getCardInfo(grpId: number): { name: string; is_land: number } | undefined {
   return getDb()
@@ -69,6 +74,54 @@ function saveSoundBytes(cardName: string, grpIds: number[], audio: Buffer, exten
   for (const grpId of grpIds) soundMap[String(grpId)] = `sounds/${fileName}`
   saveSoundMap(soundMap)
   return fileName
+}
+
+function getManagedSoundFile(soundPath: string) {
+  if (typeof soundPath !== 'string' || !soundPath.trim()) return null
+  const fullPath = path.resolve(USER_DATA_DIR, soundPath)
+  const relativePath = path.relative(path.resolve(SOUNDS_DIR), fullPath)
+  if (!relativePath || relativePath.startsWith('..') || path.isAbsolute(relativePath)) return null
+  return fullPath
+}
+
+function readSoundLibraryMetadata(): SoundLibraryMetadata {
+  try {
+    const data = JSON.parse(fs.readFileSync(SOUND_LIBRARY_FILE, 'utf8'))
+    return data && typeof data === 'object' && !Array.isArray(data) ? data : {}
+  } catch {
+    return {}
+  }
+}
+
+function writeSoundLibraryMetadata(metadata: SoundLibraryMetadata) {
+  fs.mkdirSync(path.dirname(SOUND_LIBRARY_FILE), { recursive: true })
+  fs.writeFileSync(SOUND_LIBRARY_FILE, JSON.stringify(metadata, null, 2))
+}
+
+function removeUnreferencedSoundFiles(soundPaths: Set<string>, soundMap: Record<string, string>) {
+  const remainingPaths = new Set(Object.values(soundMap))
+  for (const soundPath of soundPaths) {
+    if (remainingPaths.has(soundPath)) continue
+    const fullPath = getManagedSoundFile(soundPath)
+    if (!fullPath || !fs.existsSync(fullPath)) continue
+    try {
+      fs.unlinkSync(fullPath)
+    } catch (error) {
+      console.error('Não foi possível remover o arquivo de áudio:', error)
+    }
+  }
+}
+
+async function getSoundFileHash(filePath: string) {
+  const stats = fs.statSync(filePath)
+  const cached = soundHashCache.get(filePath)
+  if (cached && cached.size === stats.size && cached.modifiedAt === stats.mtimeMs) return cached.hash
+
+  const hash = createHash('sha256')
+  for await (const chunk of fs.createReadStream(filePath)) hash.update(chunk)
+  const digest = hash.digest('hex')
+  soundHashCache.set(filePath, { size: stats.size, modifiedAt: stats.mtimeMs, hash: digest })
+  return digest
 }
 
 function toAudioDataUrl(filePath: string) {
@@ -254,6 +307,210 @@ export function registerSoundIpc() {
       .sort((a, b) => a.cardName.localeCompare(b.cardName))
   })
 
+  ipcMain.handle('sound-library:list', async () => {
+    const soundMap = getSoundMap()
+    const metadata = readSoundLibraryMetadata()
+    const groups = new Map<string, {
+      contentHash: string
+      grpIds: number[]
+      cardNames: Set<string>
+      soundPaths: Set<string>
+      soundFiles: Set<string>
+      favorite: boolean
+      tags: Set<string>
+    }>()
+
+    for (const [grpId, soundPath] of Object.entries(soundMap)) {
+      const fullPath = getManagedSoundFile(soundPath)
+      if (!fullPath || !fs.existsSync(fullPath)) continue
+      const contentHash = await getSoundFileHash(fullPath)
+      const cardName = getCardInfo(Number(grpId))?.name ?? `Carta #${grpId}`
+      const savedMetadata = metadata[soundPath]
+      const group = groups.get(contentHash) ?? {
+        contentHash,
+        grpIds: [],
+        cardNames: new Set<string>(),
+        soundPaths: new Set<string>(),
+        soundFiles: new Set<string>(),
+        favorite: false,
+        tags: new Set<string>(),
+      }
+      group.grpIds.push(Number(grpId))
+      group.cardNames.add(cardName)
+      group.soundPaths.add(soundPath)
+      group.soundFiles.add(path.basename(soundPath))
+      group.favorite ||= savedMetadata?.favorite === true
+      for (const tag of Array.isArray(savedMetadata?.tags) ? savedMetadata.tags : []) {
+        if (typeof tag === 'string' && tag.trim()) group.tags.add(tag.trim())
+      }
+      groups.set(contentHash, group)
+    }
+
+    return [...groups.values()]
+      .map((group) => {
+        const soundPaths = [...group.soundPaths].sort((a, b) => a.localeCompare(b))
+        return {
+          contentHash: group.contentHash,
+          soundPath: soundPaths[0],
+          soundPaths,
+          soundFile: path.basename(soundPaths[0]),
+          soundFiles: [...group.soundFiles].sort((a, b) => a.localeCompare(b)),
+          duplicateCount: Math.max(0, soundPaths.length - 1),
+          grpIds: [...new Set(group.grpIds)],
+          cardNames: [...group.cardNames].sort((a, b) => a.localeCompare(b)),
+          favorite: group.favorite,
+          tags: [...group.tags].slice(0, 8),
+        }
+      })
+      .sort((a, b) => Number(b.favorite) - Number(a.favorite) || a.soundFile.localeCompare(b.soundFile))
+  })
+
+  ipcMain.handle('sound-library:metadata:set', (_, data: {
+    soundPath?: unknown
+    soundPaths?: unknown
+    favorite?: unknown
+    tags?: unknown
+  }) => {
+    try {
+      const soundPaths = Array.isArray(data?.soundPaths)
+        ? data.soundPaths
+        : typeof data?.soundPath === 'string' ? [data.soundPath] : []
+      const soundMapValues = new Set(Object.values(getSoundMap()))
+      if (!soundPaths.length || soundPaths.some((soundPath) =>
+        typeof soundPath !== 'string' || !soundMapValues.has(soundPath) || !getManagedSoundFile(soundPath)
+      )) {
+        throw new Error('Esse áudio não está mais disponível na biblioteca.')
+      }
+      if (data.favorite !== undefined && typeof data.favorite !== 'boolean') {
+        throw new Error('Valor de favorito inválido.')
+      }
+      if (data.tags !== undefined && (!Array.isArray(data.tags) || data.tags.some((tag) => typeof tag !== 'string'))) {
+        throw new Error('As tags precisam ser uma lista de textos.')
+      }
+
+      const metadata = readSoundLibraryMetadata()
+      const normalizedTags = Array.isArray(data.tags)
+        ? [...new Map(
+            data.tags
+              .map((tag) => tag.trim().replace(/\s+/g, ' ').slice(0, 24))
+              .filter(Boolean)
+              .slice(0, 8)
+              .map((tag) => [tag.toLocaleLowerCase(), tag])
+          ).values()]
+        : undefined
+      let savedFavorite = false
+      let savedTags: string[] = []
+      for (const soundPath of soundPaths as string[]) {
+        const current = metadata[soundPath] ?? {}
+        if (typeof data.favorite === 'boolean') current.favorite = data.favorite
+        if (normalizedTags) current.tags = normalizedTags
+        metadata[soundPath] = current
+        savedFavorite ||= current.favorite === true
+        savedTags = current.tags ?? savedTags
+      }
+      writeSoundLibraryMetadata(metadata)
+      return { success: true, favorite: savedFavorite, tags: savedTags }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Não foi possível salvar os dados do áudio.' }
+    }
+  })
+
+  ipcMain.handle('sound-library:merge', async (_, data: {
+    soundPaths?: unknown
+    keepSoundPath?: unknown
+  }) => {
+    try {
+      if (!Array.isArray(data?.soundPaths) || data.soundPaths.length < 2 || data.soundPaths.some((value) => typeof value !== 'string')) {
+        throw new Error('Não há cópias duplicadas para unificar.')
+      }
+      const soundPaths = [...new Set(data.soundPaths as string[])]
+      const keepSoundPath = typeof data.keepSoundPath === 'string' ? data.keepSoundPath : ''
+      if (soundPaths.length < 2 || !soundPaths.includes(keepSoundPath)) {
+        throw new Error('Escolha o arquivo que deve ser mantido.')
+      }
+
+      const soundMap = getSoundMap()
+      const mapValues = new Set(Object.values(soundMap))
+      const files = soundPaths.map((soundPath) => {
+        const fullPath = getManagedSoundFile(soundPath)
+        if (!fullPath || !fs.existsSync(fullPath) || !mapValues.has(soundPath)) {
+          throw new Error('Uma das cópias não está mais disponível. Atualize a biblioteca e tente novamente.')
+        }
+        return { soundPath, fullPath }
+      })
+      const hashes = await Promise.all(files.map(({ fullPath }) => getSoundFileHash(fullPath)))
+      if (new Set(hashes).size !== 1) {
+        throw new Error('Os arquivos não têm conteúdo idêntico e não podem ser unificados.')
+      }
+
+      let remappedCount = 0
+      for (const [grpId, soundPath] of Object.entries(soundMap)) {
+        if (soundPaths.includes(soundPath) && soundPath !== keepSoundPath) {
+          soundMap[grpId] = keepSoundPath
+          remappedCount += 1
+        }
+      }
+      saveSoundMap(soundMap)
+
+      const metadata = readSoundLibraryMetadata()
+      const favorite = soundPaths.some((soundPath) => metadata[soundPath]?.favorite === true)
+      const tags = [...new Map(
+        soundPaths.flatMap((soundPath) => Array.isArray(metadata[soundPath]?.tags) ? metadata[soundPath].tags! : [])
+          .filter((tag): tag is string => typeof tag === 'string' && Boolean(tag.trim()))
+          .map((tag) => [tag.toLocaleLowerCase(), tag.trim().slice(0, 24)])
+      ).values()].slice(0, 8)
+      metadata[keepSoundPath] = { favorite, tags }
+      for (const soundPath of soundPaths) {
+        if (soundPath !== keepSoundPath) delete metadata[soundPath]
+      }
+      writeSoundLibraryMetadata(metadata)
+
+      const removedPaths = new Set(soundPaths.filter((soundPath) => soundPath !== keepSoundPath))
+      removeUnreferencedSoundFiles(removedPaths, soundMap)
+      for (const file of files) soundHashCache.delete(file.fullPath)
+      return {
+        success: true,
+        soundFile: path.basename(keepSoundPath),
+        mergedCount: removedPaths.size,
+        remappedCount,
+      }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Não foi possível unificar as cópias.' }
+    }
+  })
+
+  ipcMain.handle('sound-library:assign', (_, data: {
+    soundPath?: unknown
+    grpIds?: unknown
+  }) => {
+    try {
+      const soundPath = typeof data?.soundPath === 'string' ? data.soundPath : ''
+      const soundMap = getSoundMap()
+      const fullPath = getManagedSoundFile(soundPath)
+      if (!fullPath || !fs.existsSync(fullPath) || !Object.values(soundMap).includes(soundPath)) {
+        throw new Error('Esse áudio não está mais disponível na biblioteca.')
+      }
+      if (!Array.isArray(data.grpIds) || !data.grpIds.length || data.grpIds.some((grpId) => !Number.isSafeInteger(grpId) || grpId <= 0)) {
+        throw new Error('Selecione uma carta válida para vincular o áudio.')
+      }
+
+      const grpIds = [...new Set(data.grpIds as number[])]
+      const placeholders = grpIds.map(() => '?').join(',')
+      const validGrpIds = getDb()
+        .prepare(`SELECT grp_id FROM cards WHERE grp_id IN (${placeholders})`)
+        .all(...grpIds) as Array<{ grp_id: number }>
+      if (validGrpIds.length !== grpIds.length) throw new Error('Algumas versões da carta não foram encontradas no banco do Arena.')
+
+      const replacedPaths = new Set(grpIds.map((grpId) => soundMap[String(grpId)]).filter((value): value is string => Boolean(value)))
+      for (const grpId of grpIds) soundMap[String(grpId)] = soundPath
+      saveSoundMap(soundMap)
+      removeUnreferencedSoundFiles(replacedPaths, soundMap)
+      return { success: true, soundFile: path.basename(soundPath) }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Não foi possível vincular o áudio.' }
+    }
+  })
+
   ipcMain.handle('sound:play', (_, grpId: number) => {
     const soundPath = getSoundMap()[String(grpId)]
 
@@ -307,18 +564,7 @@ export function registerSoundIpc() {
       saveSoundMap(soundMap)
 
       for (const soundPath of removedPaths) {
-        if (Object.values(soundMap).includes(soundPath)) continue
-
-        const fullPath = path.resolve(USER_DATA_DIR, soundPath)
-        const soundsDirectory = `${path.resolve(SOUNDS_DIR)}${path.sep}`
-
-        if (fullPath.startsWith(soundsDirectory) && fs.existsSync(fullPath)) {
-          try {
-            fs.unlinkSync(fullPath)
-          } catch (error) {
-            console.error('Não foi possível remover o arquivo de áudio:', error)
-          }
-        }
+        removeUnreferencedSoundFiles(new Set([soundPath]), soundMap)
       }
 
       return { success: true }

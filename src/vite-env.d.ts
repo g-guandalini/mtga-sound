@@ -104,6 +104,37 @@ interface Window {
       isLand: boolean
     }>>
 
+    listSoundLibrary: () => Promise<Array<{
+      contentHash: string
+      soundPath: string
+      soundPaths: string[]
+      soundFile: string
+      soundFiles: string[]
+      duplicateCount: number
+      grpIds: number[]
+      cardNames: string[]
+      favorite: boolean
+      tags: string[]
+    }>>
+    setSoundLibraryMetadata: (data: { soundPath?: string; soundPaths?: string[]; favorite?: boolean; tags?: string[] }) => Promise<{
+      success: boolean
+      favorite?: boolean
+      tags?: string[]
+      error?: string
+    }>
+    mergeSoundLibraryDuplicates: (data: { soundPaths: string[]; keepSoundPath: string }) => Promise<{
+      success: boolean
+      soundFile?: string
+      mergedCount?: number
+      remappedCount?: number
+      error?: string
+    }>
+    assignSoundFromLibrary: (data: { soundPath: string; grpIds: number[] }) => Promise<{
+      success: boolean
+      soundFile?: string
+      error?: string
+    }>
+
     openMyInstants: () => Promise<{ success: boolean }>
 
     searchMyInstants: (data: { query: string; page?: number }) => Promise<{
