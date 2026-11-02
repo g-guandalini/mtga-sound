@@ -1,0 +1,72 @@
+* { box-sizing: border-box; }
+
+html,
+body,
+#overlay-app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+  font-family: Inter, "Segoe UI", sans-serif;
+  color: #f4f1fa;
+}
+
+body { user-select: none; }
+button { font: inherit; }
+
+.arenaOverlay { width: 100%; height: 100%; padding: 3px; }
+.overlayLauncher {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  place-items: center;
+  border: 1px solid rgba(204, 185, 249, .55);
+  border-radius: 16px;
+  background: rgba(28, 24, 38, .94);
+  color: #dfd1ff;
+  box-shadow: 0 5px 18px rgba(0, 0, 0, .4);
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+.overlayLauncher:hover { background: #392b55; border-color: #cfbaff; }
+.overlayLauncher svg { width: 23px; height: 23px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+.overlayPanel {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(176, 158, 216, .45);
+  border-radius: 13px;
+  background: rgba(20, 19, 27, .96);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .46);
+}
+.overlayHeader { display: flex; min-height: 57px; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 10px 8px 13px; border-bottom: 1px solid #36313f; }
+.overlayHeading { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.overlayHeading strong { color: #e6d9ff; font-size: 13px; font-weight: 750; }
+.overlayHeading span { max-width: 190px; overflow: hidden; color: #a9a3b4; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.overlayHeaderActions { display: flex; flex: none; align-items: center; gap: 5px; }
+.overlayCount { display: grid; min-width: 23px; height: 23px; place-items: center; padding: 0 5px; border: 1px solid #55466e; border-radius: 7px; background: #282234; color: #d6c6f3; font-size: 11px; }
+.overlayClose { display: grid; width: 25px; height: 25px; place-items: center; padding: 0 0 2px; border: 1px solid #48434e; border-radius: 7px; background: #24222a; color: #ccc6d4; cursor: pointer; font-size: 17px; line-height: 1; }
+.overlayClose:hover { border-color: #9d83c4; background: #332b41; }
+.overlayVolumeControl { display: grid; min-height: 42px; grid-template-columns: 45px minmax(0, 1fr) 42px; align-items: center; gap: 8px; padding: 5px 12px; border-bottom: 1px solid #36313f; color: #aaa5b5; font-size: 10px; }
+.overlayVolumeControl input { width: 100%; margin: 0; accent-color: #a88ae9; cursor: pointer; }
+.overlayVolumeControl output { color: #e4d8ff; font-size: 10px; font-weight: 700; text-align: right; }
+.overlayList { min-height: 0; flex: 1; overflow-y: auto; padding: 4px 8px; }
+.overlayCardRow { display: flex; min-height: 62px; flex-direction: column; justify-content: center; gap: 5px; padding: 6px 3px 6px 6px; border-bottom: 1px solid rgba(255,255,255,.07); }
+.overlayCardTopline { display: flex; min-width: 0; align-items: center; gap: 7px; }
+.overlayCardName { overflow: hidden; color: #f0edf5; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.overlayQuantity { color: #8e8998; font-size: 10px; }
+.overlayCardActions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.overlayTriggerGroup { display: inline-flex; max-width: calc(100% - 36px); align-items: center; gap: 2px; padding: 2px; border: 1px solid #34313f; border-radius: 7px; background: #14141b; }
+.overlayTriggerGroup button { min-height: 22px; padding: 0 6px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: #aaa5b5; cursor: pointer; font-size: 9px; font-weight: 650; white-space: nowrap; }
+.overlayTriggerGroup button:hover:not(:disabled) { color: #e6def5; background: #24212e; }
+.overlayTriggerGroup button.selected { border-color: #574a72; background: #2a2438; color: #e4d8ff; }
+.overlayTriggerGroup button:disabled { cursor: wait; opacity: .6; }
+.overlayPlay { display: grid; width: 28px; height: 28px; place-items: center; padding: 0; border: 1px solid #67538b; border-radius: 8px; background: #2a2238; color: #dfd0ff; cursor: pointer; }
+.overlayPlay:hover, .overlayPlay.playing { border-color: #a68ad1; background: #483462; color: white; }
+.overlayPlay svg { width: 16px; height: 16px; fill: currentColor; }
+.overlayEmpty { margin: auto; padding: 18px; color: #aaa5b2; font-size: 12px; line-height: 1.45; text-align: center; }
+.overlayFooter { flex: none; padding: 7px 10px; border-top: 1px solid #36313f; color: #827d8b; font-size: 10px; text-align: right; }

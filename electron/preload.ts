@@ -16,9 +16,33 @@ contextBridge.exposeInMainWorld('electronAPI', {
   */
   onPlaySound: (callback: (path: string) => void) =>
     ipcRenderer.on('play-sound', (_, path) => callback(path)),
+  reportAudioPlaybackError: (message: string) =>
+    ipcRenderer.send('audio:playback-error', message),
+  getAppUpdateStatus: () => ipcRenderer.invoke('app-update:status'),
+  onAppUpdateStatus: (callback: (status: {
+    state: 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'installing' | 'up-to-date' | 'error'
+    version?: string
+    percent?: number
+    error?: string
+  }) => void) => ipcRenderer.on('app-update:status', (_, status) => callback(status)),
+  checkForAppUpdate: () => ipcRenderer.invoke('app-update:check'),
+  downloadAppUpdate: () => ipcRenderer.invoke('app-update:download'),
+  installAppUpdate: () => ipcRenderer.invoke('app-update:install'),
 
   onSavedDecksUpdated: (callback: () => void) =>
     ipcRenderer.on('arena-decks-updated', () => callback()),
+  onArenaDeckOverlayUpdate: (callback: (data: {
+    deckName: string
+    cards: Array<{ cardName: string; quantity: number; grpId: number; isLand?: boolean }>
+  } | null) => void) =>
+    ipcRenderer.on('arena-deck-overlay:update', (_, data) => callback(data)),
+  getArenaDeckOverlayData: () => ipcRenderer.invoke('arena-deck-overlay:get-data'),
+  setArenaDeckOverlayData: (data: {
+    deckName: string
+    cards: Array<{ cardName: string; quantity: number; grpId: number; isLand?: boolean }>
+  }) => ipcRenderer.invoke('arena-deck-overlay:save-data', data),
+  setArenaDeckOverlayExpanded: (expanded: boolean) =>
+    ipcRenderer.send('arena-deck-overlay:expanded', expanded),
 
   /*
   |--------------------------------------------------------------------------
@@ -41,8 +65,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     collectorNumber: string
   }>) => ipcRenderer.invoke('cards:resolve-deck', entries),
 
-  readClipboardText: () => ipcRenderer.invoke('clipboard:read-text'),
-
   getSavedArenaDecks: () => ipcRenderer.invoke('decks:saved-from-log'),
 
   getLogFileStatus: () =>
@@ -61,6 +83,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setAppThemeMode: (mode: 'dark' | 'light') => ipcRenderer.invoke('theme-mode:set', mode),
   getAppVolume: () => ipcRenderer.invoke('app-volume:get'),
   setAppVolume: (volume: number) => ipcRenderer.invoke('app-volume:set', volume),
+  onAppVolumeUpdate: (callback: (volume: number) => void) =>
+    ipcRenderer.on('app-volume:update', (_, volume) => callback(volume)),
+  getArenaShortcutEnabled: () => ipcRenderer.invoke('arena-shortcut:get'),
+  setArenaShortcutEnabled: (enabled: boolean) => ipcRenderer.invoke('arena-shortcut:set', enabled),
   getAutoStartWithArena: () => ipcRenderer.invoke('arena-autostart:get'),
   setAutoStartWithArena: (enabled: boolean) =>
     ipcRenderer.invoke('arena-autostart:set', enabled),
@@ -73,6 +99,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   listSounds: () =>
     ipcRenderer.invoke('sounds:list'),
+
+  listEventSounds: () => ipcRenderer.invoke('event-sounds:list'),
+  saveEventSound: (data: { eventId: 'defeat' | 'victory' | 'damage-taken' | 'damage-dealt' | 'life-gained' | 'creature-died' | 'spell-countered'; filePath: string }) =>
+    ipcRenderer.invoke('event-sound:save', data),
+  assignMyInstantsEventSound: (data: { eventId: 'defeat' | 'victory' | 'damage-taken' | 'damage-dealt' | 'life-gained' | 'creature-died' | 'spell-countered'; soundUrl: string; displayName?: string }) =>
+    ipcRenderer.invoke('myinstants:assign-event', data),
+  playEventSound: (eventId: 'defeat' | 'victory' | 'damage-taken' | 'damage-dealt' | 'life-gained' | 'creature-died' | 'spell-countered') =>
+    ipcRenderer.invoke('event-sound:play', eventId),
+  removeEventSound: (eventId: 'defeat' | 'victory' | 'damage-taken' | 'damage-dealt' | 'life-gained' | 'creature-died' | 'spell-countered') =>
+    ipcRenderer.invoke('event-sound:remove', eventId),
 
   listSoundLibrary: () => ipcRenderer.invoke('sound-library:list'),
   setSoundLibraryMetadata: (data: { soundPath?: string; soundPaths?: string[]; favorite?: boolean; tags?: string[] }) =>

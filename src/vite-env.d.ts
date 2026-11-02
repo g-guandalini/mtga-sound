@@ -1,5 +1,20 @@
 interface Window {
   electronAPI: {
+    getAppUpdateStatus: () => Promise<{
+      state: 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'installing' | 'up-to-date' | 'error'
+      version?: string
+      percent?: number
+      error?: string
+    }>
+    onAppUpdateStatus: (callback: (status: {
+      state: 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'installing' | 'up-to-date' | 'error'
+      version?: string
+      percent?: number
+      error?: string
+    }) => void) => void
+    checkForAppUpdate: () => Promise<{ success: boolean; error?: string }>
+    downloadAppUpdate: () => Promise<{ success: boolean; error?: string }>
+    installAppUpdate: () => Promise<{ success: boolean; error?: string }>
     onLog: (
       callback: (
         message: string
@@ -9,8 +24,22 @@ interface Window {
     onPlaySound: (
       callback: (url: string) => void
     ) => void
+    reportAudioPlaybackError: (message: string) => void
 
     onSavedDecksUpdated: (callback: () => void) => void
+    onArenaDeckOverlayUpdate: (callback: (data: {
+      deckName: string
+      cards: Array<{ cardName: string; quantity: number; grpId: number; isLand?: boolean }>
+    } | null) => void) => void
+    getArenaDeckOverlayData: () => Promise<{
+      deckName: string
+      cards: Array<{ cardName: string; quantity: number; grpId: number; isLand?: boolean }>
+    } | null>
+    setArenaDeckOverlayData: (data: {
+      deckName: string
+      cards: Array<{ cardName: string; quantity: number; grpId: number; isLand?: boolean }>
+    }) => Promise<{ success: boolean; error?: string }>
+    setArenaDeckOverlayExpanded: (expanded: boolean) => void
 
     searchCards: (search: string) => Promise<any[]>
 
@@ -24,8 +53,6 @@ interface Window {
       setCode: string
       collectorNumber: string
     }>) => Promise<any[]>
-
-    readClipboardText: () => Promise<string>
 
     getSavedArenaDecks: () => Promise<{
       success: boolean
@@ -80,6 +107,13 @@ interface Window {
       volume?: number
       error?: string
     }>
+    onAppVolumeUpdate: (callback: (volume: number) => void) => void
+    getArenaShortcutEnabled: () => Promise<boolean>
+    setArenaShortcutEnabled: (enabled: boolean) => Promise<{
+      success: boolean
+      enabled?: boolean
+      error?: string
+    }>
 
     getAutoStartWithArena: () => Promise<{
       available: boolean
@@ -104,6 +138,22 @@ interface Window {
       isLand: boolean
     }>>
 
+    listEventSounds: () => Promise<Array<{
+      eventId: 'defeat' | 'victory' | 'damage-taken' | 'damage-dealt' | 'life-gained' | 'creature-died' | 'spell-countered'
+      soundFile: string
+    }>>
+    saveEventSound: (data: {
+      eventId: 'defeat' | 'victory' | 'damage-taken' | 'damage-dealt' | 'life-gained' | 'creature-died' | 'spell-countered'
+      filePath: string
+    }) => Promise<{ success: boolean; eventId?: 'defeat' | 'victory' | 'damage-taken' | 'damage-dealt' | 'life-gained' | 'creature-died' | 'spell-countered'; soundFile?: string; displayName?: string; error?: string }>
+    assignMyInstantsEventSound: (data: {
+      eventId: 'defeat' | 'victory' | 'damage-taken' | 'damage-dealt' | 'life-gained' | 'creature-died' | 'spell-countered'
+      soundUrl: string
+      displayName?: string
+    }) => Promise<{ success: boolean; eventId?: 'defeat' | 'victory' | 'damage-taken' | 'damage-dealt' | 'life-gained' | 'creature-died' | 'spell-countered'; soundFile?: string; displayName?: string; error?: string }>
+    playEventSound: (eventId: 'defeat' | 'victory' | 'damage-taken' | 'damage-dealt' | 'life-gained' | 'creature-died' | 'spell-countered') => Promise<{ success: boolean; url?: string; error?: string }>
+    removeEventSound: (eventId: 'defeat' | 'victory' | 'damage-taken' | 'damage-dealt' | 'life-gained' | 'creature-died' | 'spell-countered') => Promise<{ success: boolean; error?: string }>
+
     listSoundLibrary: () => Promise<Array<{
       contentHash: string
       soundPath: string
@@ -113,6 +163,8 @@ interface Window {
       duplicateCount: number
       grpIds: number[]
       cardNames: string[]
+      eventIds: Array<'defeat' | 'victory' | 'damage-taken' | 'damage-dealt' | 'life-gained' | 'creature-died' | 'spell-countered'>
+      eventNames: string[]
       favorite: boolean
       tags: string[]
     }>>
@@ -146,6 +198,7 @@ interface Window {
         name: string
         slug: string
         sound: string
+        duration: number | null
         description: string
         tags: string
         pageUrl: string
@@ -160,6 +213,7 @@ interface Window {
     }) => Promise<{
       success: boolean
       soundFile?: string
+      displayName?: string
       error?: string
     }>
 

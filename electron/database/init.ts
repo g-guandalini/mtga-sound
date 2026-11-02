@@ -79,10 +79,10 @@ function arenaInstallRoots() {
   ])
 
   if (process.platform === 'win32') {
-    roots.push(
-      process.env['PROGRAMFILES(X86)'] && path.join(process.env['PROGRAMFILES(X86)'], 'Wizards of the Coast', 'MTGA'),
-      process.env.PROGRAMFILES && path.join(process.env.PROGRAMFILES, 'Wizards of the Coast', 'MTGA'),
-    )
+    const programFilesX86 = process.env['PROGRAMFILES(X86)']
+    const programFiles = process.env.PROGRAMFILES
+    if (programFilesX86) roots.push(path.join(programFilesX86, 'Wizards of the Coast', 'MTGA'))
+    if (programFiles) roots.push(path.join(programFiles, 'Wizards of the Coast', 'MTGA'))
   }
 
   if (process.env.MTGA_INSTALL_DIR) roots.unshift(process.env.MTGA_INSTALL_DIR)
@@ -156,7 +156,11 @@ export function getDb() {
         CASE
           WHEN instr(',' || COALESCE(arena.Types, '') || ',', ',5,') > 0 THEN 1
           ELSE 0
-        END AS is_land
+        END AS is_land,
+        CASE
+          WHEN instr(',' || COALESCE(arena.Types, '') || ',', ',2,') > 0 THEN 1
+          ELSE 0
+        END AS is_creature
       FROM main.Cards AS arena
         ;
 
@@ -210,6 +214,7 @@ type AppSettings = {
   audioPlayerScope?: AudioPlayerScope
   themeMode?: AppThemeMode
   appVolume?: number
+  arenaShortcutEnabled?: boolean
   [key: string]: unknown
 }
 
@@ -279,6 +284,17 @@ export function getAppVolume(): number {
 export function saveAppVolume(volume: number) {
   const settings = readAppSettings()
   settings.appVolume = Math.max(0, Math.min(100, Math.round(volume)))
+  fs.mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true })
+  fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2))
+}
+
+export function getArenaShortcutEnabled(): boolean {
+  return readAppSettings().arenaShortcutEnabled === true
+}
+
+export function saveArenaShortcutEnabled(enabled: boolean) {
+  const settings = readAppSettings()
+  settings.arenaShortcutEnabled = enabled
   fs.mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true })
   fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2))
 }
