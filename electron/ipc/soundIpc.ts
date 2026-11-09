@@ -3,6 +3,7 @@ import axios from 'axios'
 import { createHash } from 'node:crypto'
 import fs from 'fs'
 import path from 'path'
+import { pathToFileURL } from 'node:url'
 
 import {
   getSoundMap,
@@ -169,15 +170,8 @@ async function getSoundFileHash(filePath: string) {
   return digest
 }
 
-function toAudioDataUrl(filePath: string) {
-  const extension = path.extname(filePath).toLowerCase()
-  const mimeType = {
-    '.mp3': 'audio/mpeg',
-    '.ogg': 'audio/ogg',
-    '.wav': 'audio/wav',
-  }[extension] ?? 'application/octet-stream'
-
-  return `data:${mimeType};base64,${fs.readFileSync(filePath).toString('base64')}`
+function toAudioFileUrl(filePath: string) {
+  return pathToFileURL(filePath).href
 }
 
 export function registerSoundIpc() {
@@ -440,7 +434,7 @@ export function registerSoundIpc() {
     const soundPath = readEventSoundMap()[eventId]
     const fullPath = soundPath ? getEventSoundPath(soundPath) : null
     if (!fullPath || !fs.existsSync(fullPath)) return { success: false, error: 'Esse evento ainda não tem áudio.' }
-    return { success: true, url: toAudioDataUrl(fullPath) }
+    return { success: true, url: toAudioFileUrl(fullPath) }
   })
 
   ipcMain.handle('event-sound:remove', (_, eventId: EventSoundId) => {
@@ -722,7 +716,7 @@ export function registerSoundIpc() {
 
     return {
       success: true,
-      url: toAudioDataUrl(fullPath),
+      url: toAudioFileUrl(fullPath),
     }
   })
 

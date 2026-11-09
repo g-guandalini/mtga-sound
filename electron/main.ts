@@ -10,7 +10,7 @@ import {
   Tray,
 } from 'electron'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import electronUpdater from 'electron-updater'
 import {
   findPlayerLogFile,
@@ -193,31 +193,30 @@ function playCardSound(grpId: number) {
 
   const fullPath = path.resolve(sound)
 
+  if (!fs.existsSync(fullPath)) {
+    sendLog(`⚠️ Arquivo de som não encontrado para grpId ${grpId}: ${fullPath}`)
+    return
+  }
+
   sendLog(`🔊 Tocando som grpId ${grpId}`)
   sendLog(`📦 fullPath ${fullPath}`)
 
-  sendToMain('play-sound', toAudioDataUrl(fullPath))
+  if (!sendToMain('play-sound', toAudioFileUrl(fullPath))) {
+    sendLog(`⚠️ Janela de áudio indisponível para grpId ${grpId}`)
+  }
 }
 
 function playGameEventSound(eventId: EventSoundId, description: string) {
   const soundPath = getEventSoundFile(eventId)
   if (!soundPath) return
   sendLog(`🎯 Evento detectado: ${description}`)
-  if (!sendToMain('play-sound', toAudioDataUrl(soundPath))) {
+  if (!sendToMain('play-sound', toAudioFileUrl(soundPath))) {
     sendLog(`⚠️ Evento detectado, mas a janela de áudio não está disponível: ${description}`)
   }
 }
 
-function toAudioDataUrl(filePath: string) {
-  const extension = path.extname(filePath).toLowerCase()
-  const mimeType = {
-    '.mp3': 'audio/mpeg',
-    '.ogg': 'audio/ogg',
-    '.wav': 'audio/wav',
-  }[extension] ?? 'application/octet-stream'
-
-  const audio = fs.readFileSync(filePath).toString('base64')
-  return `data:${mimeType};base64,${audio}`
+function toAudioFileUrl(filePath: string) {
+  return pathToFileURL(filePath).href
 }
 
 /*
@@ -241,6 +240,7 @@ const playedMatchOutcomes = new Set<string>()
 const knownLocalSeatIds = new Set<number>()
 
 function resetGameEventTracking() {
+  recentTriggeredInstances.clear()
   lastLifeTotalBySeat.clear()
   lastZoneByInstance.clear()
   lastControllerSeatByInstance.clear()
@@ -608,8 +608,15 @@ function startWatcher(logFilePath: string) {
       const jsonStart = line.indexOf('{')
       if (jsonStart < 0) continue
 
+      let payload: any
       try {
-        const payload = JSON.parse(line.slice(jsonStart))
+        payload = JSON.parse(line.slice(jsonStart))
+      } catch {
+        // O Arena pode deixar uma linha incompleta durante a escrita do log.
+        continue
+      }
+
+      try {
         processMatchOutcome(payload)
         updateMatchDeckFromPayload(payload, line)
 
@@ -683,8 +690,10 @@ function startWatcher(logFilePath: string) {
             playCardSound(grpId)
           }
         }
-      } catch {
-        // Non-JSON log lines are expected; ignore them.
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error)
+        console.warn(`Falha ao processar evento do Player.log: ${detail}`)
+        sendLog(`⚠️ Falha ao processar evento do Arena: ${detail}`)
       }
     }
 
