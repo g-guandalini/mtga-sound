@@ -1132,7 +1132,18 @@ ipcMain.handle('app-update:install', () => {
   if (applicationUpdateStatus.state !== 'downloaded') return { success: false, error: 'A atualização ainda não terminou de baixar.' }
   applicationUpdateStatus = { ...applicationUpdateStatus, state: 'installing' }
   sendToMain('app-update:status', applicationUpdateStatus)
-  autoUpdater.quitAndInstall(true, true)
+  // The Windows tray handler normally prevents the main window from closing.
+  // Mark the app as quitting before handing control to NSIS so every window
+  // and the background watcher are allowed to close and release file locks.
+  isQuitting = true
+  if (arenaWindowMonitor) clearInterval(arenaWindowMonitor)
+  if (logWatcherInterval) clearInterval(logWatcherInterval)
+  logWatcherInterval = null
+  arenaDeckOverlayWindow?.destroy()
+  arenaDeckOverlayWindow = null
+  tray?.destroy()
+  tray = null
+  autoUpdater.quitAndInstall(false, true)
   return { success: true }
 })
 
